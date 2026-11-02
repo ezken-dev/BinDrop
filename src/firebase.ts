@@ -1,9 +1,11 @@
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -16,7 +18,7 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 
-// Standard Google Identity Sign-In ONLY (no restricted/sensitive Gmail scopes that trigger 403 access_denied)
+// Standard Google Identity Sign-In ONLY (no restricted Gmail scopes that trigger 403 access_denied)
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
   prompt: 'select_account',
@@ -25,6 +27,17 @@ googleProvider.setCustomParameters({
 export const initAuth = (
   onAuthSuccess?: (user: User | null) => void
 ) => {
+  // Check if returning from a mobile OAuth redirect flow
+  getRedirectResult(auth)
+    .then((result) => {
+      if (result?.user && onAuthSuccess) {
+        onAuthSuccess(result.user);
+      }
+    })
+    .catch(() => {
+      // ignore redirect check errors
+    });
+
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (onAuthSuccess) {
       onAuthSuccess(user);
@@ -37,6 +50,10 @@ export const googleSignIn = async (): Promise<{
 } | null> => {
   const result = await signInWithPopup(auth, googleProvider);
   return { user: result.user };
+};
+
+export const googleSignInRedirect = async (): Promise<void> => {
+  await signInWithRedirect(auth, googleProvider);
 };
 
 export const signInWithGooglePopup = googleSignIn;

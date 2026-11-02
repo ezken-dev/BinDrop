@@ -36,7 +36,7 @@ interface AuthLoginScreenProps {
     displayName: string;
     photoURL?: string;
   }) => Promise<void>;
-  onGoogleSignIn: () => Promise<void>;
+  onGoogleSignIn: () => Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }>;
   onDirectGoogleAccountSignIn: (payload: {
     email: string;
     displayName: string;
@@ -74,12 +74,14 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Instant Google Account Chooser Modal (prevents 403 access_denied for non-tester Gmail accounts)
+  // Instant Google Account Chooser Modal (fallback when mobile in-app WebView blocks popups or domain is not yet in Firebase Authorized Domains)
   const [isGoogleChooserOpen, setIsGoogleChooserOpen] = useState(false);
   const [googleEmailInput, setGoogleEmailInput] = useState('');
   const [googleNameInput, setGoogleNameInput] = useState('');
   const [googleModalError, setGoogleModalError] = useState<string | null>(null);
+  const [googlePopupNotice, setGooglePopupNotice] = useState<string | null>(null);
   const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
+  const [isLaunchingPopup, setIsLaunchingPopup] = useState(false);
 
   // Onboarding form fields (1 to 7 Days Rotation System)
   const [partyName, setPartyName] = useState('');
@@ -619,36 +621,73 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
           <div className="h-px flex-1 bg-white/[0.08]" />
         </div>
 
-        {/* Google Login Pill Button — opens Instant Google Account Chooser so no Gmail user hits 403 access_denied */}
-        <button
-          type="button"
-          data-testid="open-google-chooser-btn"
-          onClick={() => {
-            setGoogleModalError(null);
-            setIsGoogleChooserOpen(true);
-          }}
-          className="w-full min-h-[48px] py-3.5 px-6 rounded-full bg-[#091c0b] hover:bg-[#112914] border border-white/10 text-white og-medium text-sm flex items-center justify-center gap-3 transition-colors"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              fill="#EA4335"
-              d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"
-            />
-            <path
-              fill="#4285F4"
-              d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"
-            />
-            <path
-              fill="#FBBC05"
-              d="M5.3 14.8c-.2-.8-.4-1.8-.4-2.8s.2-2 .4-2.8L1.6 6.4C.6 8.4 0 10.6 0 13s.6 4.6 1.6 6.6l3.7-2.8z"
-            />
-            <path
-              fill="#34A853"
-              d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 19.9 7.4 23 12 23z"
-            />
-          </svg>
-          <span>Continue with Google</span>
-        </button>
+        {/* Primary Google Sign-In Button — Immediately launches the real Google OAuth Popup */}
+        <div className="space-y-2.5">
+          <button
+            type="button"
+            disabled={isLaunchingPopup}
+            data-testid="google-popup-login-btn"
+            onClick={async () => {
+              setErrorMsg(null);
+              setGoogleModalError(null);
+              setGooglePopupNotice(null);
+              setIsLaunchingPopup(true);
+              try {
+                const res = await onGoogleSignIn();
+                if (!res.ok) {
+                  if (res.errorCode?.includes('unauthorized-domain')) {
+                    setGooglePopupNotice(
+                      `Note: Add "${window.location.hostname}" to Firebase Console → Authentication → Settings → Authorized domains for native popup, or sign in with your Gmail below right now:`
+                    );
+                  } else if (res.errorMessage) {
+                    setGooglePopupNotice(res.errorMessage);
+                  }
+                  setIsGoogleChooserOpen(true);
+                }
+              } finally {
+                setIsLaunchingPopup(false);
+              }
+            }}
+            className="w-full min-h-[48px] py-3.5 px-6 rounded-full bg-[#091c0b] hover:bg-[#112914] border border-white/10 text-white og-medium text-sm flex items-center justify-center gap-3 transition-colors disabled:opacity-60"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="#EA4335"
+                d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"
+              />
+              <path
+                fill="#4285F4"
+                d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"
+              />
+              <path
+                fill="#FBBC05"
+                d="M5.3 14.8c-.2-.8-.4-1.8-.4-2.8s.2-2 .4-2.8L1.6 6.4C.6 8.4 0 10.6 0 13s.6 4.6 1.6 6.6l3.7-2.8z"
+              />
+              <path
+                fill="#34A853"
+                d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 19.9 7.4 23 12 23z"
+              />
+            </svg>
+            <span>
+              {isLaunchingPopup ? 'Opening Google Sign-In Popup...' : 'Continue with Google'}
+            </span>
+          </button>
+
+          <div className="text-center">
+            <button
+              type="button"
+              data-testid="open-google-chooser-btn"
+              onClick={() => {
+                setGoogleModalError(null);
+                setGooglePopupNotice(null);
+                setIsGoogleChooserOpen(true);
+              }}
+              className="text-[11px] og-medium text-zinc-400 hover:text-[#d0ff45] underline underline-offset-4 transition-colors"
+            >
+              Popup blocked on mobile browser? Sign in with Gmail address directly →
+            </button>
+          </div>
+        </div>
 
         {/* Bottom Switch Mode Link */}
         <div className="text-center text-xs og-book text-zinc-400 pt-1">
@@ -684,7 +723,7 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
         </div>
       </div>
 
-      {/* Instant Google Account Sign-In Modal (prevents Error 403: access_denied for any Gmail user) */}
+      {/* Direct Google Account Sign-In Modal (works on Netlify static hosting & mobile in-app browsers) */}
       {isGoogleChooserOpen && (
         <div
           role="dialog"
@@ -715,7 +754,7 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                 <div>
                   <h2 className="text-base og-bold text-white">Sign in with Google</h2>
                   <p className="text-xs text-zinc-400">
-                    Works with any Gmail account (no 403 verification block)
+                    Works on Netlify &amp; mobile browsers with any Gmail account
                   </p>
                 </div>
               </div>
@@ -727,6 +766,12 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {googlePopupNotice && (
+              <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-400/30 text-amber-200 text-xs leading-relaxed">
+                {googlePopupNotice}
+              </div>
+            )}
 
             <form onSubmit={handleInstantGoogleSubmit} className="space-y-3.5">
               <div className="space-y-1">
@@ -752,7 +797,7 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                   type="text"
                   value={googleNameInput}
                   onChange={(e) => setGoogleNameInput(e.target.value)}
-                  placeholder="e.g. Rifat"
+                  placeholder="e.g. Rifat Ashhab"
                   data-testid="google-instant-name-input"
                   className="pill-input w-full px-4 py-3 rounded-2xl text-sm text-white placeholder:text-zinc-500"
                 />
@@ -778,12 +823,16 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
             </form>
 
             <div className="pt-2 border-t border-white/10 flex items-center justify-between gap-2 text-[11px] text-zinc-400">
-              <span>Or use Firebase OAuth popup:</span>
+              <span>Retry Google OAuth popup window:</span>
               <button
                 type="button"
                 onClick={async () => {
-                  setIsGoogleChooserOpen(false);
-                  await onGoogleSignIn();
+                  const res = await onGoogleSignIn();
+                  if (res.ok) {
+                    setIsGoogleChooserOpen(false);
+                  } else if (res.errorMessage) {
+                    setGoogleModalError(res.errorMessage);
+                  }
                 }}
                 className="text-[#d0ff45] hover:underline og-medium"
               >

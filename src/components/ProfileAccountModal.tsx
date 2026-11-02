@@ -24,7 +24,7 @@ interface ProfileAccountViewProps {
     uid: string,
     updates: { displayName: string; email?: string; photoURL?: string }
   ) => Promise<void>;
-  onGoogleSignIn: () => Promise<void>;
+  onGoogleSignIn: () => Promise<unknown>;
   onSignOut: () => Promise<void>;
   onBackToHud: () => void;
 }

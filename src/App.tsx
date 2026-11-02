@@ -58,6 +58,7 @@ import {
   type AuthenticatedAccount,
 } from './components/AuthLoginScreen';
 import { MemberAvatar } from './components/MemberAvatar';
+import { apiFetch } from './utils/apiClient';
 
 type ActiveTab = 'hud' | 'admin' | 'party' | 'profile';
 
@@ -222,9 +223,8 @@ export default function App() {
         email: currentAccount.email,
         ...(currentAccount.partyId ? { partyId: currentAccount.partyId } : {}),
       });
-      const res = await fetch(`/api/session?${params.toString()}`);
-      if (!res.ok) return;
-      const data = await res.json();
+      const { ok, data } = await apiFetch(`/api/session?${params.toString()}`);
+      if (!ok || !data) return;
       if (data.user) {
         setCurrentAccount((prev) => {
           if (!prev) return data.user;
@@ -280,7 +280,7 @@ export default function App() {
       setFirebaseUser(user);
       if (user && user.email) {
         try {
-          const res = await fetch('/api/auth/google-sync', {
+          const { ok, data } = await apiFetch('/api/auth/google-sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -290,8 +290,7 @@ export default function App() {
               photoURL: user.photoURL || undefined,
             }),
           });
-          if (res.ok) {
-            const data = await res.json();
+          if (ok && data?.user) {
             setCurrentAccount(data.user);
             if (data.bundle) {
               applyServerBundle(data.bundle);
@@ -339,28 +338,26 @@ export default function App() {
     displayName: string;
     photoURL?: string;
   }) => {
-    const res = await fetch('/api/auth/register', {
+    const { ok, data } = await apiFetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Could not create account.');
+    if (!ok) {
+      throw new Error(data?.error || 'Could not create account.');
     }
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
   };
 
   const handleLoginWithEmail = async (payload: { email: string; password: string }) => {
-    const res = await fetch('/api/auth/login', {
+    const { ok, data } = await apiFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Invalid login credentials.');
+    if (!ok) {
+      throw new Error(data?.error || 'Invalid login credentials.');
     }
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
@@ -372,7 +369,7 @@ export default function App() {
     photoURL?: string;
   }) => {
     setAuthError(null);
-    const res = await fetch('/api/auth/google-sync', {
+    const { ok, data } = await apiFetch('/api/auth/google-sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -382,22 +379,30 @@ export default function App() {
         photoURL: payload.photoURL || undefined,
       }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Could not sign in with Google account.');
+    if (!ok) {
+      throw new Error(data?.error || 'Could not sign in with Google account.');
     }
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
   };
 
-  const handleGoogleSignIn = async () => {
+  const handleGoogleSignIn = async (): Promise<{
+    ok: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+  }> => {
     setAuthError(null);
     try {
       const result = await googleSignIn();
-      if (!result) return;
+      if (!result || !result.user) {
+        return {
+          ok: false,
+          errorMessage: 'Google Sign-In popup did not return an account. Sign in with your Gmail address below:',
+        };
+      }
       const { user } = result;
       if (user && user.email) {
-        const res = await fetch('/api/auth/google-sync', {
+        const { ok, data } = await apiFetch('/api/auth/google-sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -407,18 +412,24 @@ export default function App() {
             photoURL: user.photoURL || undefined,
           }),
         });
-        if (res.ok) {
-          const data = await res.json();
+        if (ok && data?.user) {
           setCurrentAccount(data.user);
           applyServerBundle(data.bundle);
+          return { ok: true };
         }
       }
-    } catch (err) {
-      setAuthError(
+      return { ok: false, errorMessage: 'Could not sync Google profile.' };
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      const msg =
         err instanceof Error
           ? err.message
-          : 'Google OAuth popup was closed or blocked. Use the instant Google Account entry instead.'
-      );
+          : 'Google Sign-In popup was blocked by your browser. Enter your Gmail address below to continue:';
+      return {
+        ok: false,
+        errorCode: code,
+        errorMessage: msg,
+      };
     }
   };
 
@@ -440,7 +451,7 @@ export default function App() {
     initialDeadlineHours?: number;
   }) => {
     if (!currentAccount) return;
-    const res = await fetch('/api/party/create', {
+    const { ok, data } = await apiFetch('/api/party/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -453,9 +464,8 @@ export default function App() {
         initialDeadlineHours: payload.initialDeadlineHours,
       }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Failed to create household party.');
+    if (!ok) {
+      throw new Error(data?.error || 'Failed to create household party.');
     }
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
@@ -466,7 +476,7 @@ export default function App() {
 
   const handleJoinHouseholdByCode = async (inviteCode: string) => {
     if (!currentAccount) return;
-    const res = await fetch('/api/party/join', {
+    const { ok, data } = await apiFetch('/api/party/join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -477,9 +487,8 @@ export default function App() {
         userPhotoURL: currentAccount.photoURL,
       }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Could not join household party.');
+    if (!ok) {
+      throw new Error(data?.error || 'Could not join household party.');
     }
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
@@ -490,7 +499,7 @@ export default function App() {
     memberEmail: string;
   }) => {
     if (!party) return;
-    const res = await fetch('/api/party/add-member', {
+    const { ok, data } = await apiFetch('/api/party/add-member', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -499,9 +508,8 @@ export default function App() {
         memberEmail: payload.memberEmail,
       }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Failed to add roommate.');
+    if (!ok) {
+      throw new Error(data?.error || 'Failed to add roommate.');
     }
     applyServerBundle(data.bundle);
     if (data.bundle?.party) {
@@ -521,7 +529,7 @@ export default function App() {
       party.members[party.currentTurnIndex] ||
       party.members[0];
 
-    const res = await fetch('/api/party/drop', {
+    const { ok, data } = await apiFetch('/api/party/drop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -534,8 +542,7 @@ export default function App() {
       }),
     });
 
-    const data = await res.json();
-    if (res.ok && data.bundle) {
+    if (ok && data?.bundle) {
       applyServerBundle(data.bundle);
       const updatedParty: PartyState = data.bundle.party;
 
@@ -570,7 +577,7 @@ export default function App() {
     if (!party) return;
     setIsVerifyingDropId(params.dropId);
     try {
-      const res = await fetch('/api/party/verify-drop', {
+      const { ok, data } = await apiFetch('/api/party/verify-drop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -581,8 +588,7 @@ export default function App() {
           hostName: currentAccount?.displayName || 'Host',
         }),
       });
-      const data = await res.json();
-      if (res.ok && data.bundle) {
+      if (ok && data?.bundle) {
         applyServerBundle(data.bundle);
         const updatedParty: PartyState = data.bundle.party;
         const nextMember =
@@ -610,8 +616,8 @@ export default function App() {
   // Exclusively uses official BinDrop sender account: bindropofficial@gmail.com
   const handleSaveAppPassword = async (
     appPassword: string
-  ): Promise<{ ok: boolean; message: string }> => {
-    const res = await fetch('/api/official-email/config', {
+  ): Promise<{ ok: boolean; message: string; error?: string; flushedCount?: number }> => {
+    const { ok, data } = await apiFetch('/api/official-email/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -619,28 +625,30 @@ export default function App() {
         partyId: party?.id,
       }),
     });
-    const data = await res.json();
-    if (data.status) {
-      setMailerStatus(data.status);
+    if (data?.status || data?.mailerStatus) {
+      setMailerStatus(data.status || data.mailerStatus);
     }
-    if (data.bundle) {
+    if (data?.bundle) {
       applyServerBundle(data.bundle);
     }
-    if (res.ok && data.ok) {
-      setCelebrationBanner(
-        data.message || `Verified smtp.gmail.com for ${OFFICIAL_BINDROP_EMAIL}!`
-      );
+    if (ok && data?.ok) {
+      const msg =
+        data.message || `Verified smtp.gmail.com for ${OFFICIAL_BINDROP_EMAIL}!`;
+      setCelebrationBanner(msg);
       setTimeout(() => setCelebrationBanner(null), 6500);
       return {
         ok: true,
-        message: data.message || `Verified smtp.gmail.com for ${OFFICIAL_BINDROP_EMAIL}!`,
+        message: msg,
+        flushedCount: data.flushedCount || 0,
       };
     }
+    const errText =
+      data?.error ||
+      'Google SMTP rejected this password. Make sure it is a 16-character Google App Password from myaccount.google.com/apppasswords.';
     return {
       ok: false,
-      message:
-        data.error ||
-        'Google SMTP rejected this password. Make sure it is a 16-character Google App Password from myaccount.google.com/apppasswords.',
+      message: errText,
+      error: errText,
     };
   };
 
@@ -652,7 +660,7 @@ export default function App() {
   }): Promise<{ deliveredViaGmail: boolean; error?: string }> => {
     if (!party) return { deliveredViaGmail: false, error: 'Party not found.' };
 
-    const res = await fetch('/api/send-email', {
+    const { ok, data } = await apiFetch('/api/send-email', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -663,11 +671,10 @@ export default function App() {
         customMessage: params.customMessage,
       }),
     });
-    const data = await res.json();
-    if (data.bundle) {
+    if (data?.bundle) {
       applyServerBundle(data.bundle);
     }
-    if (res.ok && data.email) {
+    if (ok && data?.email) {
       const actuallyDelivered = data.email.deliveryStatus === 'SENT_VIA_SMTP';
       if (actuallyDelivered) {
         setCelebrationBanner(
@@ -682,12 +689,12 @@ export default function App() {
         return { deliveredViaGmail: false, error: smtpErr };
       }
     }
-    return { deliveredViaGmail: false, error: data.error || 'Could not send email.' };
+    return { deliveredViaGmail: false, error: data?.error || 'Could not send email.' };
   };
 
   const handleUpdateTurnDeadline = async (nextDeadlineIso: string) => {
     if (!party) return;
-    const res = await fetch('/api/party/deadline', {
+    const { ok, data } = await apiFetch('/api/party/deadline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -695,8 +702,7 @@ export default function App() {
         nextDeadlineIso,
       }),
     });
-    const data = await res.json();
-    if (res.ok && data.bundle) {
+    if (ok && data?.bundle) {
       applyServerBundle(data.bundle);
       await syncPartyToFirestore(data.bundle.party);
     }
@@ -704,7 +710,7 @@ export default function App() {
 
   const handleUpdateRotationIntervalHours = async (rotationIntervalHours: number) => {
     if (!party) return;
-    const res = await fetch('/api/party/deadline', {
+    const { ok, data } = await apiFetch('/api/party/deadline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -712,8 +718,7 @@ export default function App() {
         rotationIntervalHours,
       }),
     });
-    const data = await res.json();
-    if (res.ok && data.bundle) {
+    if (ok && data?.bundle) {
       applyServerBundle(data.bundle);
       const days = Math.round(rotationIntervalHours / 24);
       setCelebrationBanner(
@@ -726,15 +731,14 @@ export default function App() {
 
   const handleHostSkipTurn = async () => {
     if (!party) return;
-    const res = await fetch('/api/party/skip', {
+    const { ok, data } = await apiFetch('/api/party/skip', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         partyId: party.id,
       }),
     });
-    const data = await res.json();
-    if (res.ok && data.bundle) {
+    if (ok && data?.bundle) {
       applyServerBundle(data.bundle);
       await syncPartyToFirestore(data.bundle.party);
     }
@@ -744,7 +748,7 @@ export default function App() {
     uid: string,
     updates: { displayName: string; email?: string; photoURL?: string }
   ) => {
-    const res = await fetch('/api/party/profile', {
+    const { ok, data } = await apiFetch('/api/party/profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -755,11 +759,10 @@ export default function App() {
         photoURL: updates.photoURL,
       }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Could not update profile.');
+    if (!ok) {
+      throw new Error(data?.error || 'Could not update profile.');
     }
-    if (data.bundle) {
+    if (data?.bundle) {
       applyServerBundle(data.bundle);
     }
     setCurrentAccount((prev) =>
