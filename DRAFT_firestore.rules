@@ -1,0 +1,333 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == "RabsRaphel@gmail.com"
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Entity Blueprint Validators
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'totalDrops', 'onTimeDrops', 'missedDrops',
+          'points', 'currentStreak', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'photoURL', 'partyId', 'totalDrops',
+          'onTimeDrops', 'missedDrops', 'points', 'currentStreak',
+          'createdAt', 'updatedAt'
+        ])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 200000))
+        && (!('partyId' in data) || (data.partyId is string && data.partyId.size() <= 128 && data.partyId.matches('^[a-zA-Z0-9_\\-]+$')))
+        && data.totalDrops is int && data.totalDrops >= 0
+        && data.onTimeDrops is int && data.onTimeDrops >= 0
+        && data.missedDrops is int && data.missedDrops >= 0
+        && data.points is int && data.points >= 0
+        && data.currentStreak is int && data.currentStreak >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data) {
+      return data.keys().hasAll(['email', 'notificationsEnabled', 'updatedAt'])
+        && data.keys().hasOnly(['email', 'notificationsEnabled', 'updatedAt'])
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.notificationsEnabled is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidParty(data, partyId) {
+      return data.keys().hasAll([
+          'id', 'name', 'inviteCode', 'hostId', 'memberIds',
+          'currentTurnIndex', 'currentTurnUserId', 'turnStatus',
+          'nextDeadline', 'rotationIntervalHours',
+          'warningEmailSentForCurrentTurn', 'missedEmailSentForCurrentTurn',
+          'hostAlertedForCurrentTurn', 'totalPartyDrops', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'inviteCode', 'hostId', 'memberIds',
+          'currentTurnIndex', 'currentTurnUserId', 'turnStatus',
+          'nextDeadline', 'rotationIntervalHours',
+          'warningEmailSentForCurrentTurn', 'missedEmailSentForCurrentTurn',
+          'hostAlertedForCurrentTurn', 'totalPartyDrops', 'createdAt', 'updatedAt'
+        ])
+        && data.id == partyId
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.inviteCode is string && data.inviteCode.size() >= 4 && data.inviteCode.size() <= 16 && data.inviteCode.matches('^[A-Z0-9\\-]+$')
+        && data.hostId is string && isValidId(data.hostId)
+        && data.memberIds is list && data.memberIds.size() >= 1 && data.memberIds.size() <= 12
+        && data.memberIds[0] is string && data.memberIds[0].size() <= 128
+        && data.currentTurnIndex is int && data.currentTurnIndex >= 0 && data.currentTurnIndex < data.memberIds.size()
+        && data.currentTurnUserId is string && isValidId(data.currentTurnUserId)
+        && data.turnStatus in ['PENDING', 'OVERDUE', 'COMPLETED']
+        && data.nextDeadline is string && data.nextDeadline.size() >= 10 && data.nextDeadline.size() <= 64
+        && data.rotationIntervalHours is int && data.rotationIntervalHours >= 1 && data.rotationIntervalHours <= 720
+        && data.warningEmailSentForCurrentTurn is bool
+        && data.missedEmailSentForCurrentTurn is bool
+        && data.hostAlertedForCurrentTurn is bool
+        && data.totalPartyDrops is int && data.totalPartyDrops >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTrashDrop(data, partyId, dropId) {
+      return data.keys().hasAll([
+          'id', 'partyId', 'userId', 'userDisplayName', 'imageUrl',
+          'verified', 'aiConfidence', 'detectedContainerType', 'aiReasoning',
+          'pointsAwarded', 'completedOnTime', 'deadlineIso', 'submittedIso', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'partyId', 'userId', 'userDisplayName', 'imageUrl',
+          'verified', 'aiConfidence', 'detectedContainerType', 'aiReasoning',
+          'pointsAwarded', 'completedOnTime', 'deadlineIso', 'submittedIso', 'createdAt'
+        ])
+        && data.id == dropId
+        && data.partyId == partyId
+        && data.userId == request.auth.uid
+        && data.userDisplayName is string && data.userDisplayName.size() >= 1 && data.userDisplayName.size() <= 80
+        && data.imageUrl is string && data.imageUrl.size() >= 1 && data.imageUrl.size() <= 200000
+        && data.verified is bool && data.verified == true
+        && data.aiConfidence is number && data.aiConfidence >= 0 && data.aiConfidence <= 1
+        && data.detectedContainerType is string && data.detectedContainerType.size() >= 1 && data.detectedContainerType.size() <= 160
+        && data.aiReasoning is string && data.aiReasoning.size() >= 1 && data.aiReasoning.size() <= 600
+        && data.pointsAwarded is int && data.pointsAwarded >= 0 && data.pointsAwarded <= 1000
+        && data.completedOnTime is bool
+        && data.deadlineIso is string && data.deadlineIso.size() >= 10 && data.deadlineIso.size() <= 64
+        && data.submittedIso is string && data.submittedIso.size() >= 10 && data.submittedIso.size() <= 64
+        && data.createdAt is timestamp;
+    }
+
+    function isValidTurnHistoryRecord(data, partyId, historyId) {
+      return data.keys().hasAll([
+          'id', 'partyId', 'userId', 'userDisplayName', 'outcome',
+          'pointsAwarded', 'deadlineIso', 'recordedIso', 'notes', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'partyId', 'userId', 'userDisplayName', 'outcome',
+          'pointsAwarded', 'deadlineIso', 'recordedIso', 'dropId', 'notes', 'createdAt'
+        ])
+        && data.id == historyId
+        && data.partyId == partyId
+        && isValidId(data.userId)
+        && data.userDisplayName is string && data.userDisplayName.size() >= 1 && data.userDisplayName.size() <= 80
+        && data.outcome in ['ON_TIME', 'COMPLETED_LATE', 'MISSED_DEADLINE', 'SKIPPED_BY_HOST']
+        && data.pointsAwarded is int && data.pointsAwarded >= 0 && data.pointsAwarded <= 1000
+        && data.deadlineIso is string && data.deadlineIso.size() >= 10 && data.deadlineIso.size() <= 64
+        && data.recordedIso is string && data.recordedIso.size() >= 10 && data.recordedIso.size() <= 64
+        && (!('dropId' in data) || (data.dropId is string && data.dropId.size() <= 128 && data.dropId.matches('^[a-zA-Z0-9_\\-]+$')))
+        && data.notes is string && data.notes.size() >= 1 && data.notes.size() <= 400
+        && data.createdAt is timestamp;
+    }
+
+    function isValidPartyAlert(data, partyId, alertId) {
+      return data.keys().hasAll([
+          'id', 'partyId', 'targetUserId', 'assigneeUserId',
+          'type', 'message', 'read', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'partyId', 'targetUserId', 'assigneeUserId',
+          'type', 'message', 'read', 'createdAt'
+        ])
+        && data.id == alertId
+        && data.partyId == partyId
+        && isValidId(data.targetUserId)
+        && isValidId(data.assigneeUserId)
+        && data.type in ['WARNING_5H', 'TURN_REMINDER', 'HOST_ESCALATION', 'TURN_COMPLETED']
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 400
+        && data.read is bool
+        && data.createdAt is timestamp;
+    }
+
+    function isPartyMember(partyId) {
+      return request.auth.uid in get(/databases/$(database)/documents/parties/$(partyId)).data.memberIds;
+    }
+
+    function isPartyHost(partyId) {
+      return get(/databases/$(database)/documents/parties/$(partyId)).data.hostId == request.auth.uid;
+    }
+
+    // Bootstrapped Admins Registry
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow write: if false;
+    }
+
+    // Users Public Profile
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (
+        isOwner(userId) ||
+        isAdmin() ||
+        (existing().partyId is string && request.auth.uid in get(/databases/$(database)/documents/parties/$(existing().partyId)).data.memberIds)
+      );
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'photoURL', 'partyId', 'totalDrops', 'onTimeDrops',
+            'missedDrops', 'points', 'currentStreak', 'updatedAt'
+          ]))
+        );
+
+      // Isolated PII Subcollection
+      match /private/{docId} {
+        allow get: if (isOwner(userId) || isAdmin()) && isValidId(userId) && isValidId(docId);
+        allow create, update: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(docId)
+          && isValidUserPrivateInfo(incoming())
+          && incoming().updatedAt == request.time;
+      }
+    }
+
+    // Household Parties
+    match /parties/{partyId} {
+      allow get: if isSignedIn() && isValidId(partyId) && (request.auth.uid in existing().memberIds || isAdmin());
+      allow list: if isSignedIn() && (request.auth.uid in existing().memberIds || isAdmin());
+
+      allow create: if isVerifiedUser()
+        && isValidId(partyId)
+        && isValidParty(incoming(), partyId)
+        && incoming().hostId == request.auth.uid
+        && request.auth.uid in incoming().memberIds
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(partyId)
+        && isValidParty(incoming(), partyId)
+        && incoming().id == existing().id
+        && incoming().hostId == existing().hostId
+        && incoming().inviteCode == existing().inviteCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          ||
+          // Action 1: Roommate joins party via invite code
+          (!(request.auth.uid in existing().memberIds)
+            && request.auth.uid in incoming().memberIds
+            && incoming().memberIds.size() == existing().memberIds.size() + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'updatedAt']))
+          ||
+          // Action 2: Current member or host rotates turn, updates status/deadline/email flags, or records drop count
+          (request.auth.uid in existing().memberIds
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'memberIds', 'currentTurnIndex', 'currentTurnUserId',
+              'turnStatus', 'nextDeadline', 'rotationIntervalHours',
+              'warningEmailSentForCurrentTurn', 'missedEmailSentForCurrentTurn',
+              'hostAlertedForCurrentTurn', 'totalPartyDrops', 'updatedAt'
+            ]))
+        );
+
+      // Subcollection: Verified Trash Drops (Host & Member Photo Database)
+      match /drops/{dropId} {
+        allow get: if isSignedIn() && isValidId(partyId) && isValidId(dropId) && (isPartyMember(partyId) || isAdmin());
+        allow list: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+
+        allow create: if isVerifiedUser()
+          && isValidId(partyId)
+          && isValidId(dropId)
+          && isValidTrashDrop(incoming(), partyId, dropId)
+          && incoming().createdAt == request.time
+          && (isPartyMember(partyId) || isAdmin());
+
+        // Terminal state lock: verified drops are immutable audit records
+        allow update, delete: if false;
+      }
+
+      // Subcollection: Turn History Records
+      match /history/{historyId} {
+        allow get: if isSignedIn() && isValidId(partyId) && isValidId(historyId) && (isPartyMember(partyId) || isAdmin());
+        allow list: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+
+        allow create: if isVerifiedUser()
+          && isValidId(partyId)
+          && isValidId(historyId)
+          && isValidTurnHistoryRecord(incoming(), partyId, historyId)
+          && incoming().createdAt == request.time
+          && (isPartyMember(partyId) || isPartyHost(partyId) || isAdmin());
+
+        allow update, delete: if false;
+      }
+
+      // Subcollection: Reminders & Host Escalation Alerts
+      match /alerts/{alertId} {
+        allow get: if isSignedIn() && isValidId(partyId) && isValidId(alertId) && (isPartyMember(partyId) || isAdmin());
+        allow list: if isSignedIn() && (existing().targetUserId == request.auth.uid || isAdmin());
+
+        allow create: if isVerifiedUser()
+          && isValidId(partyId)
+          && isValidId(alertId)
+          && isValidPartyAlert(incoming(), partyId, alertId)
+          && incoming().createdAt == request.time
+          && (isPartyMember(partyId) || isAdmin());
+
+        allow update: if isVerifiedUser()
+          && isValidId(partyId)
+          && isValidId(alertId)
+          && isValidPartyAlert(incoming(), partyId, alertId)
+          && existing().read == false
+          && incoming().read == true
+          && incoming().id == existing().id
+          && incoming().partyId == existing().partyId
+          && incoming().targetUserId == existing().targetUserId
+          && incoming().assigneeUserId == existing().assigneeUserId
+          && incoming().type == existing().type
+          && incoming().message == existing().message
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['read'])
+          && (request.auth.uid == existing().targetUserId || isAdmin());
+      }
+    }
+  }
+}

@@ -1,0 +1,431 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account and household profile persisted in Firestore.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Unique user ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name shown across the party.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile picture URL or compressed data URI.",
+          "maxLength": 200000
+        },
+        "partyId": {
+          "type": "string",
+          "description": "Active household party ID.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "totalDrops": {
+          "type": "integer",
+          "description": "Total AI-verified trash drops completed."
+        },
+        "onTimeDrops": {
+          "type": "integer",
+          "description": "Total trash drops completed on time before the deadline."
+        },
+        "missedDrops": {
+          "type": "integer",
+          "description": "Total trash turns missed on time."
+        },
+        "points": {
+          "type": "integer",
+          "description": "Total gamified score."
+        },
+        "currentStreak": {
+          "type": "integer",
+          "description": "Consecutive on-time trash drops."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Account creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Profile update timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "totalDrops",
+        "onTimeDrops",
+        "missedDrops",
+        "points",
+        "currentStreak",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII document storing the user's account email for 5-hour warnings and missed-deadline notifications.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Account email address for automated reminders.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "notificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether 5-hour warning and missed-deadline emails are enabled."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp."
+        }
+      },
+      "required": ["email", "notificationsEnabled", "updatedAt"]
+    },
+    "Party": {
+      "title": "Party",
+      "description": "Household party state tracking turn rotation, 6-character invite code, 5-hour warning status, and deadline.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "inviteCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "hostId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberIds": {
+          "type": "array",
+          "maxLength": 12
+        },
+        "currentTurnIndex": {
+          "type": "integer"
+        },
+        "currentTurnUserId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "turnStatus": {
+          "type": "string",
+          "enum": ["PENDING", "OVERDUE", "COMPLETED"]
+        },
+        "nextDeadline": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "rotationIntervalHours": {
+          "type": "integer"
+        },
+        "warningEmailSentForCurrentTurn": {
+          "type": "boolean",
+          "description": "Whether the 5-hour warning email has been dispatched for the active turn."
+        },
+        "missedEmailSentForCurrentTurn": {
+          "type": "boolean",
+          "description": "Whether the missed-deadline email and host alert have been dispatched for the active turn."
+        },
+        "hostAlertedForCurrentTurn": {
+          "type": "boolean"
+        },
+        "totalPartyDrops": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "inviteCode",
+        "hostId",
+        "memberIds",
+        "currentTurnIndex",
+        "currentTurnUserId",
+        "turnStatus",
+        "nextDeadline",
+        "rotationIntervalHours",
+        "warningEmailSentForCurrentTurn",
+        "missedEmailSentForCurrentTurn",
+        "hostAlertedForCurrentTurn",
+        "totalPartyDrops",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TrashDrop": {
+      "title": "TrashDrop",
+      "description": "Timestamped database record of a user's trash disposal photo verified by the Household Host.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "partyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userDisplayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "imageUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200000
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "verificationStatus": {
+          "type": "string",
+          "enum": ["PENDING_HOST_APPROVAL", "VERIFIED", "REJECTED"]
+        },
+        "locationNote": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "pointsAwarded": {
+          "type": "integer"
+        },
+        "completedOnTime": {
+          "type": "boolean"
+        },
+        "deadlineIso": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "submittedIso": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "partyId",
+        "userId",
+        "userDisplayName",
+        "imageUrl",
+        "verified",
+        "verificationStatus",
+        "locationNote",
+        "pointsAwarded",
+        "completedOnTime",
+        "deadlineIso",
+        "submittedIso",
+        "createdAt"
+      ]
+    },
+    "TurnHistoryRecord": {
+      "title": "TurnHistoryRecord",
+      "description": "Historical turn compliance log tracking who completed on time, who completed late, and who missed their deadline.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "partyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userDisplayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["ON_TIME", "COMPLETED_LATE", "MISSED_DEADLINE", "SKIPPED_BY_HOST"]
+        },
+        "pointsAwarded": {
+          "type": "integer"
+        },
+        "deadlineIso": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "recordedIso": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "dropId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "partyId",
+        "userId",
+        "userDisplayName",
+        "outcome",
+        "pointsAwarded",
+        "deadlineIso",
+        "recordedIso",
+        "notes",
+        "createdAt"
+      ]
+    },
+    "PartyAlert": {
+      "title": "PartyAlert",
+      "description": "Automated turn reminder, 5-hour warning, or missed-deadline host escalation alert.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "partyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "targetUserId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "assigneeUserId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["WARNING_5H", "TURN_REMINDER", "HOST_ESCALATION", "TURN_COMPLETED"]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "partyId",
+        "targetUserId",
+        "assigneeUserId",
+        "type",
+        "message",
+        "read",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Public household user profile and leaderboard stats."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Isolated PII subcollection for user email and notification settings."
+    },
+    "/parties/{partyId}": {
+      "schema": { "$ref": "#/entities/Party" },
+      "description": "Household party state, invite code, member rotation queue, and deadline."
+    },
+    "/parties/{partyId}/drops/{dropId}": {
+      "schema": { "$ref": "#/entities/TrashDrop" },
+      "description": "Verified AI proof-of-work trash disposal photo database for a party."
+    },
+    "/parties/{partyId}/history/{historyId}": {
+      "schema": { "$ref": "#/entities/TurnHistoryRecord" },
+      "description": "Turn history tracking who completed on time, who completed late, and who missed deadlines."
+    },
+    "/parties/{partyId}/alerts/{alertId}": {
+      "schema": { "$ref": "#/entities/PartyAlert" },
+      "description": "5-hour warnings, turn reminders, and missed-deadline host escalation alerts."
+    }
+  }
+}

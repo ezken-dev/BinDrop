@@ -1,0 +1,6 @@
+{
+  "name": "BinDrop — Gamified Household Trash Duty Tracker",
+  "description": "Real-time household trash disposal tracker with 1-to-7 day turn scheduling, party leaderboards, Gmail deadline alerts, and Host photo verification.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
