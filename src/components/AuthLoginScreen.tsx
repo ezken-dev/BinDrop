@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Mail,
   Lock,
@@ -13,9 +13,16 @@ import {
   ChevronLeft,
   Calendar,
   X,
+  BellRing,
+  Sparkles,
 } from 'lucide-react';
 import { compressUploadedImage } from '../utils/sceneImageGenerator';
-import { OFFICIAL_BINDROP_EMAIL, ROTATION_DAY_OPTIONS } from '../utils/trashDutyLogic';
+import {
+  OFFICIAL_BINDROP_EMAIL,
+  ROTATION_DAY_OPTIONS,
+  formatRotationDaysLabel,
+  type HouseholdInvitation,
+} from '../utils/trashDutyLogic';
 import { PRESET_AVATARS } from './MemberAvatar';
 
 export interface AuthenticatedAccount {
@@ -29,6 +36,9 @@ export interface AuthenticatedAccount {
 
 interface AuthLoginScreenProps {
   currentAccount: AuthenticatedAccount | null;
+  pendingInvitations?: HouseholdInvitation[];
+  onAcceptInvitation?: (invitation: HouseholdInvitation) => Promise<void>;
+  onDeclineInvitation?: (invitation: HouseholdInvitation) => Promise<void>;
   onLoginWithEmail: (payload: { email: string; password: string }) => Promise<void>;
   onRegisterWithEmail: (payload: {
     email: string;
@@ -53,6 +63,9 @@ interface AuthLoginScreenProps {
 
 export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
   currentAccount,
+  pendingInvitations = [],
+  onAcceptInvitation,
+  onDeclineInvitation,
   onLoginWithEmail,
   onRegisterWithEmail,
   onGoogleSignIn,
@@ -62,7 +75,16 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
   onSignOut,
 }) => {
   const [authMode, setAuthMode] = useState<'signup' | 'login'>('signup');
-  const [onboardingMode, setOnboardingMode] = useState<'create' | 'join'>('create');
+  const [onboardingMode, setOnboardingMode] = useState<'create' | 'join' | 'invitations'>(
+    pendingInvitations.length > 0 ? 'invitations' : 'create'
+  );
+  const [processingInviteId, setProcessingInviteId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (pendingInvitations.length > 0) {
+      setOnboardingMode('invitations');
+    }
+  }, [pendingInvitations.length]);
 
   // Auth form fields
   const [email, setEmail] = useState('');
@@ -227,7 +249,9 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
             <h1 className="text-2xl sm:text-3xl og-bold text-white tracking-tight">
               {onboardingMode === 'create'
                 ? 'Create Household Party'
-                : 'Enter 6-Char Invite Code'}
+                : onboardingMode === 'join'
+                ? 'Enter 6-Char Invite Code'
+                : 'Household Invitations'}
             </h1>
             <p className="text-xs og-light text-zinc-400 leading-relaxed">
               Signed in as <strong className="og-medium text-zinc-200">{currentAccount.email}</strong>.
@@ -235,22 +259,22 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
             </p>
           </div>
 
-          {/* Mode Toggle Pills */}
-          <div className="grid grid-cols-2 gap-2 p-1.5 rounded-full bg-[#07190a] border border-white/10">
+          {/* 3-Tab Mode Selector: Create Party / Invite Code / Invitations */}
+          <div className="grid grid-cols-3 gap-1.5 p-1.5 rounded-full bg-[#07190a] border border-white/10">
             <button
               type="button"
               onClick={() => {
                 setOnboardingMode('create');
                 setErrorMsg(null);
               }}
-              className={`py-2.5 px-4 rounded-full text-xs og-bold transition-all flex items-center justify-center gap-1.5 ${
+              className={`py-2.5 px-2 rounded-full text-[11px] sm:text-xs og-bold transition-all flex items-center justify-center gap-1 ${
                 onboardingMode === 'create'
                   ? 'bg-[#d0ff45] text-[#041206]'
                   : 'text-zinc-400 hover:text-white'
               }`}
             >
-              <Home className="w-3.5 h-3.5" />
-              Create Party (Host)
+              <Home className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Create Party</span>
             </button>
             <button
               type="button"
@@ -258,14 +282,43 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                 setOnboardingMode('join');
                 setErrorMsg(null);
               }}
-              className={`py-2.5 px-4 rounded-full text-xs og-bold transition-all flex items-center justify-center gap-1.5 ${
+              className={`py-2.5 px-2 rounded-full text-[11px] sm:text-xs og-bold transition-all flex items-center justify-center gap-1 ${
                 onboardingMode === 'join'
                   ? 'bg-[#d0ff45] text-[#041206]'
                   : 'text-zinc-400 hover:text-white'
               }`}
             >
-              <KeyRound className="w-3.5 h-3.5" />
-              Enter Invite Code
+              <KeyRound className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Invite Code</span>
+            </button>
+            <button
+              type="button"
+              data-testid="onboarding-invitations-tab"
+              onClick={() => {
+                setOnboardingMode('invitations');
+                setErrorMsg(null);
+              }}
+              className={`py-2.5 px-2 rounded-full text-[11px] sm:text-xs og-bold transition-all flex items-center justify-center gap-1 relative ${
+                onboardingMode === 'invitations'
+                  ? 'bg-[#d0ff45] text-[#041206]'
+                  : pendingInvitations.length > 0
+                  ? 'bg-[#153118] text-[#d0ff45] border border-[#d0ff45]/40'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <BellRing className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Invitations</span>
+              {pendingInvitations.length > 0 && (
+                <span
+                  className={`ml-0.5 px-1.5 py-0.2 rounded-full text-[10px] font-mono og-bold ${
+                    onboardingMode === 'invitations'
+                      ? 'bg-[#041206] text-[#d0ff45]'
+                      : 'bg-[#d0ff45] text-[#041206]'
+                  }`}
+                >
+                  {pendingInvitations.length}
+                </span>
+              )}
             </button>
           </div>
 
@@ -383,7 +436,7 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
-          ) : (
+          ) : onboardingMode === 'join' ? (
             <form onSubmit={handleJoinPartySubmit} className="space-y-5">
               {/* 6-Digit/Character Visual Slots (3 chars + hyphen + 3 chars) */}
               <div
@@ -455,6 +508,134 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
+          ) : (
+            <div className="space-y-4">
+              {pendingInvitations.length === 0 ? (
+                <div className="p-6 rounded-3xl bg-[#07190a] border border-white/10 text-center space-y-2.5">
+                  <div className="w-12 h-12 rounded-2xl bg-[#132916] border border-[#d0ff45]/30 flex items-center justify-center text-[#d0ff45] mx-auto">
+                    <BellRing className="w-5 h-5" />
+                  </div>
+                  <p className="text-sm og-bold text-white">No Pending Email Invitations</p>
+                  <p className="text-xs text-zinc-400 leading-relaxed">
+                    When a Household Host invites <span className="text-[#d0ff45] font-mono">{currentAccount.email}</span> to their party, their invite card will pop up right here so you can join in one tap.
+                  </p>
+                  <div className="pt-2 flex items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOnboardingMode('join')}
+                      className="px-4 py-2 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-xs og-medium text-white transition-colors"
+                    >
+                      Have a 6-Char Code?
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOnboardingMode('create')}
+                      className="px-4 py-2 rounded-full bg-[#153118] border border-[#d0ff45]/30 text-xs og-bold text-[#d0ff45] transition-colors"
+                    >
+                      Create Party
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {pendingInvitations.map((inv) => {
+                    const isBusy = processingInviteId === inv.id;
+                    return (
+                      <div
+                        key={inv.id}
+                        data-testid={`household-invitation-${inv.id}`}
+                        className="p-5 rounded-3xl bg-gradient-to-br from-[#123117] to-[#08190b] border border-[#d0ff45]/45 shadow-lg space-y-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-11 h-11 rounded-2xl bg-[#d0ff45] text-[#041206] flex items-center justify-center og-bold text-sm shrink-0">
+                              <Sparkles className="w-5 h-5" />
+                            </div>
+                            <div className="min-w-0">
+                              <span className="inline-block px-2 py-0.5 rounded-md bg-[#d0ff45]/15 border border-[#d0ff45]/30 text-[10px] font-mono text-[#d0ff45] uppercase tracking-wider mb-1">
+                                Household Party Invite
+                              </span>
+                              <h3 className="text-base og-bold text-white truncate">
+                                {inv.partyName}
+                              </h3>
+                              <p className="text-xs text-zinc-300 truncate">
+                                Invited by <strong className="text-[#d0ff45]">{inv.hostName}</strong> ({inv.hostEmail})
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 p-3 rounded-2xl bg-black/30 border border-white/10 text-xs">
+                          <div>
+                            <p className="text-[10px] font-mono uppercase text-zinc-400">6-Char Code</p>
+                            <p className="text-sm font-mono og-bold text-[#d0ff45] mt-0.5">
+                              {inv.inviteCode}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] font-mono uppercase text-zinc-400">Rotation</p>
+                            <p className="text-sm og-medium text-white mt-0.5">
+                              {formatRotationDaysLabel(inv.rotationIntervalHours)}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2.5">
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async () => {
+                              if (!onAcceptInvitation) return;
+                              setErrorMsg(null);
+                              setProcessingInviteId(inv.id);
+                              try {
+                                await onAcceptInvitation(inv);
+                              } catch (err) {
+                                setErrorMsg(
+                                  err instanceof Error ? err.message : 'Failed to accept invitation.'
+                                );
+                              } finally {
+                                setProcessingInviteId(null);
+                              }
+                            }}
+                            className="lime-cta flex-1 py-3.5 px-4 rounded-full text-xs og-bold flex items-center justify-center gap-1.5"
+                          >
+                            <Check className="w-4 h-4" />
+                            <span>{isBusy ? 'Joining...' : 'Accept & Join Household'}</span>
+                          </button>
+                          {onDeclineInvitation && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={async () => {
+                                setErrorMsg(null);
+                                setProcessingInviteId(inv.id);
+                                try {
+                                  await onDeclineInvitation(inv);
+                                } catch (err) {
+                                  setErrorMsg(
+                                    err instanceof Error ? err.message : 'Failed to decline invitation.'
+                                  );
+                                } finally {
+                                  setProcessingInviteId(null);
+                                }
+                              }}
+                              className="py-3.5 px-4 rounded-full bg-white/[0.06] hover:bg-rose-500/20 border border-white/10 hover:border-rose-400/40 text-xs og-medium text-zinc-300 hover:text-rose-200 transition-colors"
+                            >
+                              Decline
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {errorMsg && (
+                <p className="text-xs text-rose-400 og-medium text-center">{errorMsg}</p>
+              )}
+            </div>
           )}
         </div>
       </div>

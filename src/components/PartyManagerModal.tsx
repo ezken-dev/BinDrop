@@ -19,6 +19,7 @@ import {
   formatSixCharInviteCode,
   ROTATION_DAY_OPTIONS,
   validateInviteCode,
+  type HouseholdInvitation,
   type HouseholdMember,
   type PartyState,
 } from '../utils/trashDutyLogic';
@@ -28,6 +29,7 @@ interface PartyManagerViewProps {
   party: PartyState;
   currentUserId: string;
   isHostOrAdmin?: boolean;
+  partyInvitations?: HouseholdInvitation[];
   onCreateParty: (newParty: {
     name: string;
     rotationIntervalHours: number;
@@ -46,6 +48,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
   party,
   currentUserId,
   isHostOrAdmin = false,
+  partyInvitations = [],
   onCreateParty,
   onJoinExistingPartyByCode,
   onAddRoommateWithEmail,
@@ -124,10 +127,10 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
       setRoommateName('');
       setRoommateEmail('');
       setAddSuccess(
-        `Added ${cleanName} (${cleanEmail}) to the party rotation! Pop-up notifications enabled.`
+        `Sent Household Invitation to ${cleanName} (${cleanEmail})! It now appears in their Invitations tab & pop-up alerts.`
       );
     } catch (err) {
-      setAddError(err instanceof Error ? err.message : 'Could not add roommate.');
+      setAddError(err instanceof Error ? err.message : 'Could not send roommate invitation.');
     } finally {
       setIsAdding(false);
     }
@@ -325,7 +328,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
           </button>
         </div>
 
-        {/* Right 6 Cols: Enroll Roommate with Account Email */}
+        {/* Right 6 Cols: Invite Roommate with Account Email */}
         <form
           onSubmit={handleAddRoommateSubmit}
           className="lg:col-span-6 glass-panel rounded-[32px] p-6 sm:p-8 flex flex-col justify-between space-y-6"
@@ -333,13 +336,13 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
           <div className="space-y-2 text-center sm:text-left">
             <div className="inline-flex items-center gap-2 text-xs og-medium text-[#d0ff45]">
               <UserPlus className="w-4 h-4" />
-              <span>Enroll Roommate Account &amp; Auto-Link Party</span>
+              <span>Send Household Invitation to Roommate&apos;s Invitations Tab</span>
             </div>
             <h3 className="text-2xl og-bold text-white tracking-tight">
-              Add Roommate to Rotation
+              Invite Roommate by Email
             </h3>
             <p className="text-xs sm:text-sm og-light text-zinc-400 leading-relaxed">
-              Add a roommate with their email address. When they sign in on PC or mobile with that email, BinDrop automatically places them into <strong className="text-white">{party.name}</strong> and enables instant pop-up notifications.
+              Enter your roommate&apos;s name and email address. They will receive a live pop-up alert and see an invite card from you inside their <strong className="text-[#d0ff45]">Invitations</strong> tab to join <strong className="text-white">{party.name}</strong> in one tap.
             </p>
           </div>
 
@@ -366,7 +369,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
                 htmlFor="join-member-email"
                 className="block text-xs og-medium text-white pl-1"
               >
-                Roommate Account Email (For Cross-Device Sync &amp; Pop-Up Alerts)
+                Roommate Account Email (Deliver to Their Invitations Tab)
               </label>
               <div className="relative flex items-center">
                 <Mail className="w-4 h-4 text-zinc-400 absolute left-4 pointer-events-none" />
@@ -385,13 +388,45 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
           {addError && <p className="text-xs text-rose-400 og-medium">{addError}</p>}
           {addSuccess && <p className="text-xs text-[#d0ff45] og-medium">{addSuccess}</p>}
 
+          {partyInvitations.length > 0 && (
+            <div className="p-3.5 rounded-2xl bg-[#071809] border border-white/10 space-y-2">
+              <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
+                Sent Email Invitations ({partyInvitations.length})
+              </p>
+              <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1">
+                {partyInvitations.map((inv) => (
+                  <div
+                    key={inv.id}
+                    className="flex items-center justify-between gap-2 text-xs py-1 px-2.5 rounded-xl bg-white/[0.03]"
+                  >
+                    <div className="min-w-0">
+                      <span className="og-medium text-white">{inv.invitedName}</span>{' '}
+                      <span className="text-zinc-400 font-mono text-[11px]">({inv.invitedEmail})</span>
+                    </div>
+                    <span
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-mono og-bold shrink-0 ${
+                        inv.status === 'ACCEPTED'
+                          ? 'bg-[#d0ff45]/20 text-[#d0ff45]'
+                          : inv.status === 'DECLINED'
+                          ? 'bg-rose-500/20 text-rose-300'
+                          : 'bg-amber-400/20 text-amber-300'
+                      }`}
+                    >
+                      {inv.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <button
             type="submit"
             disabled={isAdding}
             data-testid="add-roommate-submit"
             className="lime-cta w-full py-3.5 px-6 rounded-full og-bold text-sm flex items-center justify-center gap-2 min-h-[48px]"
           >
-            <span>{isAdding ? 'Adding Roommate...' : 'Add Roommate to Party'}</span>
+            <span>{isAdding ? 'Sending Invitation...' : 'Send Household Invitation'}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>

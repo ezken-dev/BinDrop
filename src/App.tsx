@@ -46,6 +46,7 @@ import {
   ROTATION_DAY_OPTIONS,
   type EmailAlertType,
   type EmailDispatchLog,
+  type HouseholdInvitation,
   type HouseholdMember,
   type OfficialMailerStatus,
   type PartyAlertItem,
@@ -75,6 +76,7 @@ interface PartyBundlePayload {
   history: TurnHistoryRecord[];
   emails: EmailDispatchLog[];
   alerts: PartyAlertItem[];
+  partyInvitations?: HouseholdInvitation[];
   mailerStatus?: OfficialMailerStatus;
 }
 
@@ -114,15 +116,44 @@ function playSocialNotificationChime() {
 
 function triggerBrowserPushNotification(title: string, body: string, tag?: string) {
   try {
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate([120, 60, 120]);
+    }
     if (typeof window === 'undefined' || !('Notification' in window)) return;
     if (Notification.permission === 'granted') {
-      new Notification(title, {
-        body,
-        tag: tag || `bindrop_${Date.now()}`,
-      });
+      const notifTag = tag || `bindrop_${Date.now()}`;
+      // On Android Chrome, new Notification() throws Illegal constructor and requires ServiceWorkerRegistration.showNotification
+      if ('serviceWorker' in navigator && navigator.serviceWorker) {
+        navigator.serviceWorker
+          .getRegistration()
+          .then((reg) => {
+            if (reg && typeof reg.showNotification === 'function') {
+              reg.showNotification(title, { body, tag: notifTag }).catch(() => {});
+            } else {
+              try {
+                new Notification(title, { body, tag: notifTag });
+              } catch {
+                // ignore mobile browser restriction
+              }
+            }
+          })
+          .catch(() => {
+            try {
+              new Notification(title, { body, tag: notifTag });
+            } catch {
+              // ignore
+            }
+          });
+      } else {
+        try {
+          new Notification(title, { body, tag: notifTag });
+        } catch {
+          // ignore
+        }
+      }
     }
   } catch {
-    // ignore browser notification errors in restricted iframes
+    // ignore browser notification errors in restricted iframes or mobile webviews
   }
 }
 
@@ -192,6 +223,10 @@ export default function App() {
   const [alerts, setAlerts] = useState<PartyAlertItem[]>(
     () => initialCachedBundle.current?.alerts || []
   );
+  const [partyInvitations, setPartyInvitations] = useState<HouseholdInvitation[]>(
+    () => initialCachedBundle.current?.partyInvitations || []
+  );
+  const [pendingInvitations, setPendingInvitations] = useState<HouseholdInvitation[]>([]);
   const [mailerStatus, setMailerStatus] = useState<OfficialMailerStatus | null>(
     () => initialCachedBundle.current?.mailerStatus || null
   );
@@ -236,6 +271,38 @@ export default function App() {
     );
   }, []);
 
+  const syncIncomingInvitations = useCallback(
+    (incoming?: HouseholdInvitation[]) => {
+      if (!Array.isArray(incoming)) return;
+      setPendingInvitations(incoming);
+      const unseenInvite = incoming.find(
+        (inv) => inv.status === 'PENDING' && !seenPopupIdsRef.current.has(inv.id)
+      );
+      if (unseenInvite) {
+        seenPopupIdsRef.current.add(unseenInvite.id);
+        saveSeenPopupIds(seenPopupIdsRef.current);
+        showSocialPopupNotification({
+          id: unseenInvite.id,
+          partyId: unseenInvite.partyId,
+          targetUserId: unseenInvite.invitedEmail,
+          targetDisplayName: unseenInvite.invitedName,
+          targetEmail: unseenInvite.invitedEmail,
+          assigneeUserId: unseenInvite.hostId,
+          assigneeDisplayName: unseenInvite.hostName,
+          senderName: unseenInvite.hostName,
+          senderPhotoURL: unseenInvite.hostPhotoURL,
+          title: `📩 Household Invite from ${unseenInvite.hostName}!`,
+          category: 'HOUSEHOLD_INVITE',
+          type: 'TURN_REMINDER',
+          message: `${unseenInvite.hostName} (${unseenInvite.hostEmail}) invited you to join "${unseenInvite.partyName}" (Code: ${unseenInvite.inviteCode}). Open the Invitations tab to accept!`,
+          read: false,
+          createdAt: unseenInvite.createdAt,
+        });
+      }
+    },
+    [showSocialPopupNotification]
+  );
+
   const applyServerBundle = useCallback(
     (bundle: PartyBundlePayload | null, options?: { forceClearIfNull?: boolean }) => {
       if (!bundle || !bundle.party) {
@@ -245,6 +312,7 @@ export default function App() {
           setHistoryLogs([]);
           setEmailLogs([]);
           setAlerts([]);
+          setPartyInvitations([]);
         }
         return;
       }
@@ -256,6 +324,7 @@ export default function App() {
       setDropLogs(bundle.drops || []);
       setHistoryLogs(bundle.history || []);
       setEmailLogs(bundle.emails || []);
+      setPartyInvitations(bundle.partyInvitations || []);
 
       const incomingAlerts = bundle.alerts || [];
       setAlerts(incomingAlerts);
@@ -391,6 +460,9 @@ export default function App() {
           return prev;
         });
       }
+      if (data.invitations) {
+        syncIncomingInvitations(data.invitations);
+      }
       if (data.bundle) {
         applyServerBundle(data.bundle);
       } else if (data.user && !data.user.partyId && !party) {
@@ -407,6 +479,7 @@ export default function App() {
     currentAccount?.photoURL,
     party,
     applyServerBundle,
+    syncIncomingInvitations,
   ]);
 
   useEffect(() => {
@@ -494,27 +567,47 @@ export default function App() {
     return () => unsubscribe();
   }, [applyServerBundle]);
 
-  // --- BROWSER PUSH PERMISSION HANDLER ---
+  // --- BROWSER PUSH & MOBILE SOCIAL POP-UP TEST HANDLER ---
   const handleEnableBrowserPush = async () => {
+    // Close the notification drawer first so the floating social pop-up banner is immediately visible at the top of the phone/PC screen!
+    setIsNotifDrawerOpen(false);
+
+    const testAlert: PartyAlertItem = {
+      id: `test_popup_${Date.now()}`,
+      partyId: party?.id || 'party_test',
+      targetUserId: currentAccount?.uid || 'u_test',
+      targetDisplayName: currentAccount?.displayName || 'You',
+      targetEmail: currentAccount?.email || OFFICIAL_BINDROP_EMAIL,
+      assigneeUserId: currentAccount?.uid || 'u_test',
+      assigneeDisplayName: currentAccount?.displayName || 'You',
+      senderName: currentAccount?.displayName || OFFICIAL_BINDROP_NAME,
+      senderPhotoURL: currentAccount?.photoURL,
+      title: `🔔 Live Pop-Up Test · ${party?.name || 'BinDrop'}`,
+      category: 'MANUAL_NUDGE',
+      type: 'TURN_REMINDER',
+      message:
+        'Pop-up notifications & sound alerts are working on your phone & PC! You will receive live pop-up banners for 5h warnings, missed turns, and roommate uploads.',
+      read: false,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Always trigger the in-app Instagram/Facebook-style floating pop-up banner + sound chime + phone vibration immediately!
+    showSocialPopupNotification(testAlert);
+
     try {
-      if (typeof window === 'undefined' || !('Notification' in window)) {
-        setCelebrationBanner('In-app social pop-up banners are active on this device!');
-        setTimeout(() => setCelebrationBanner(null), 4000);
-        return;
-      }
-      const permission = await Notification.requestPermission();
-      setBrowserPushPermission(permission);
-      if (permission === 'granted') {
-        triggerBrowserPushNotification(
-          'BinDrop Push Notifications Enabled 🔔',
-          'You will now receive instant pop-up alerts for trash duty turns, 5h warnings, and roommate uploads!'
-        );
-        setCelebrationBanner('Browser Push & In-App Pop-Up Notifications enabled!');
-        setTimeout(() => setCelebrationBanner(null), 4500);
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        if (Notification.permission !== 'granted') {
+          const permission = await Notification.requestPermission();
+          setBrowserPushPermission(permission);
+          if (permission === 'granted') {
+            triggerBrowserPushNotification(testAlert.title!, testAlert.message, testAlert.id);
+          }
+        } else {
+          setBrowserPushPermission('granted');
+        }
       }
     } catch {
-      setCelebrationBanner('In-app social pop-up notifications are active!');
-      setTimeout(() => setCelebrationBanner(null), 4000);
+      // Mobile browsers/WebViews that block OS Notification API still show the in-app social pop-up banner above
     }
   };
 
@@ -534,6 +627,7 @@ export default function App() {
       throw new Error(data?.error || 'Could not create account.');
     }
     setCurrentAccount(data.user);
+    if (data.invitations) syncIncomingInvitations(data.invitations);
     applyServerBundle(data.bundle, { forceClearIfNull: true });
   };
 
@@ -547,6 +641,7 @@ export default function App() {
       throw new Error(data?.error || 'Invalid login credentials.');
     }
     setCurrentAccount(data.user);
+    if (data.invitations) syncIncomingInvitations(data.invitations);
     applyServerBundle(data.bundle, { forceClearIfNull: true });
   };
 
@@ -570,6 +665,7 @@ export default function App() {
       throw new Error(data?.error || 'Could not sign in with Google account.');
     }
     setCurrentAccount(data.user);
+    if (data.invitations) syncIncomingInvitations(data.invitations);
     applyServerBundle(data.bundle, { forceClearIfNull: true });
   };
 
@@ -729,6 +825,49 @@ export default function App() {
     });
   };
 
+  const handleAcceptInvitation = async (invitation: HouseholdInvitation) => {
+    if (!currentAccount) return;
+    const { ok, data } = await apiFetch('/api/party/respond-invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        invitationId: invitation.id,
+        decision: 'ACCEPT',
+        userUid: currentAccount.uid,
+        userEmail: currentAccount.email,
+        userDisplayName: currentAccount.displayName,
+        userPhotoURL: currentAccount.photoURL,
+      }),
+    });
+    if (!ok) {
+      throw new Error(data?.error || 'Could not accept household invitation.');
+    }
+    if (data.user) setCurrentAccount(data.user);
+    if (data.invitations) setPendingInvitations(data.invitations);
+    if (data.bundle) applyServerBundle(data.bundle);
+  };
+
+  const handleDeclineInvitation = async (invitation: HouseholdInvitation) => {
+    if (!currentAccount) return;
+    const { ok, data } = await apiFetch('/api/party/respond-invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        invitationId: invitation.id,
+        decision: 'DECLINE',
+        userEmail: currentAccount.email,
+      }),
+    });
+    if (!ok) {
+      throw new Error(data?.error || 'Could not decline household invitation.');
+    }
+    if (data.invitations) {
+      setPendingInvitations(data.invitations);
+    } else {
+      setPendingInvitations((prev) => prev.filter((i) => i.id !== invitation.id));
+    }
+  };
+
   const handleAddRoommateWithEmail = async (payload: {
     memberName: string;
     memberEmail: string;
@@ -744,7 +883,7 @@ export default function App() {
       }),
     });
     if (!ok) {
-      throw new Error(data?.error || 'Failed to add roommate.');
+      throw new Error(data?.error || 'Failed to send roommate invitation.');
     }
     applyServerBundle(data.bundle);
     if (data.bundle?.party) {
@@ -1027,19 +1166,100 @@ export default function App() {
     );
   };
 
+  const socialPopupBannerElement = activePopupToast ? (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="social-popup-notification-banner"
+      className="fixed top-3 right-3 left-3 sm:top-5 sm:left-auto sm:right-5 sm:w-[420px] z-[130] animate-view-enter pointer-events-auto"
+    >
+      <div className="glass-panel-elevated rounded-[26px] p-4 border-2 border-[#d0ff45]/80 shadow-[0_24px_60px_rgba(0,0,0,0.92)] bg-[#061808]/95 backdrop-blur-xl flex items-start gap-3.5">
+        <div className="relative shrink-0">
+          <div className="w-11 h-11 rounded-full bg-[#132c16] border border-[#d0ff45]/50 flex items-center justify-center text-[#d0ff45] og-bold text-sm overflow-hidden">
+            {activePopupToast.senderPhotoURL ? (
+              <img
+                src={activePopupToast.senderPhotoURL}
+                alt={activePopupToast.senderName || 'BinDrop'}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <BellRing className="w-5 h-5 text-[#d0ff45]" />
+            )}
+          </div>
+          <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-[#d0ff45] text-[#041206] flex items-center justify-center text-[9px] og-bold shadow">
+            ★
+          </span>
+        </div>
+
+        <div className="flex-1 min-w-0 space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] font-mono uppercase tracking-wider text-[#d0ff45] og-bold">
+              BinDrop Live Pop-Up · Just Now
+            </span>
+            <button
+              type="button"
+              onClick={() => setActivePopupToast(null)}
+              aria-label="Dismiss notification"
+              className="text-zinc-400 hover:text-white p-0.5"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <p className="text-xs sm:text-sm og-bold text-white leading-snug">
+            {activePopupToast.title || `Trash Duty Alert · ${party?.name || 'BinDrop'}`}
+          </p>
+          <p className="text-xs text-zinc-200 leading-relaxed line-clamp-3">
+            {activePopupToast.message}
+          </p>
+          {party && (
+            <div className="pt-1.5 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActivePopupToast(null);
+                  setIsScannerOpen(true);
+                }}
+                className="px-3 py-1 rounded-full bg-[#d0ff45] text-[#041206] text-[11px] og-bold"
+              >
+                Upload Photo
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActivePopupToast(null);
+                  setIsNotifDrawerOpen(true);
+                }}
+                className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-white text-[11px] og-medium"
+              >
+                Open Feed ({alerts.length})
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   // --- GATED AUTH & ONBOARDING RENDER ---
   if (!currentAccount || !party) {
     return (
-      <AuthLoginScreen
-        currentAccount={currentAccount}
-        onLoginWithEmail={handleLoginWithEmail}
-        onRegisterWithEmail={handleRegisterWithEmail}
-        onGoogleSignIn={handleGoogleSignIn}
-        onDirectGoogleAccountSignIn={handleDirectGoogleAccountSignIn}
-        onCreateHousehold={handleCreateHousehold}
-        onJoinHouseholdByCode={handleJoinHouseholdByCode}
-        onSignOut={handleSignOut}
-      />
+      <>
+        {socialPopupBannerElement}
+        <AuthLoginScreen
+          currentAccount={currentAccount}
+          pendingInvitations={pendingInvitations}
+          onAcceptInvitation={handleAcceptInvitation}
+          onDeclineInvitation={handleDeclineInvitation}
+          onLoginWithEmail={handleLoginWithEmail}
+          onRegisterWithEmail={handleRegisterWithEmail}
+          onGoogleSignIn={handleGoogleSignIn}
+          onDirectGoogleAccountSignIn={handleDirectGoogleAccountSignIn}
+          onCreateHousehold={handleCreateHousehold}
+          onJoinHouseholdByCode={handleJoinHouseholdByCode}
+          onSignOut={handleSignOut}
+        />
+      </>
     );
   }
 
@@ -1088,78 +1308,7 @@ export default function App() {
   return (
     <div className="min-h-screen text-slate-100 pb-20 md:pb-12">
       {/* FACEBOOK / INSTAGRAM STYLE FLOATING SOCIAL POP-UP NOTIFICATION BANNER */}
-      {activePopupToast && (
-        <div
-          role="status"
-          aria-live="polite"
-          data-testid="social-popup-notification-banner"
-          className="fixed top-16 right-4 left-4 sm:left-auto sm:w-[410px] z-50 animate-view-enter"
-        >
-          <div className="glass-panel-elevated rounded-[26px] p-4 border border-[#d0ff45]/60 shadow-[0_20px_50px_rgba(0,0,0,0.85)] bg-[#061808]/95 backdrop-blur-xl flex items-start gap-3.5">
-            <div className="relative shrink-0">
-              <div className="w-11 h-11 rounded-full bg-[#132c16] border border-[#d0ff45]/50 flex items-center justify-center text-[#d0ff45] og-bold text-sm overflow-hidden">
-                {activePopupToast.senderPhotoURL ? (
-                  <img
-                    src={activePopupToast.senderPhotoURL}
-                    alt={activePopupToast.senderName || 'BinDrop'}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <BellRing className="w-5 h-5 text-[#d0ff45]" />
-                )}
-              </div>
-              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-[#d0ff45] text-[#041206] flex items-center justify-center text-[9px] og-bold shadow">
-                ★
-              </span>
-            </div>
-
-            <div className="flex-1 min-w-0 space-y-1">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[10px] font-mono uppercase tracking-wider text-[#d0ff45] og-bold">
-                  BinDrop Live Pop-Up · Just Now
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setActivePopupToast(null)}
-                  aria-label="Dismiss notification"
-                  className="text-zinc-400 hover:text-white p-0.5"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              <p className="text-xs sm:text-sm og-bold text-white leading-snug">
-                {activePopupToast.title || `Trash Duty Alert · ${party.name}`}
-              </p>
-              <p className="text-xs text-zinc-300 leading-relaxed line-clamp-3">
-                {activePopupToast.message}
-              </p>
-              <div className="pt-1.5 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActivePopupToast(null);
-                    setIsScannerOpen(true);
-                  }}
-                  className="px-3 py-1 rounded-full bg-[#d0ff45] text-[#041206] text-[11px] og-bold"
-                >
-                  Upload Photo
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActivePopupToast(null);
-                    setIsNotifDrawerOpen(true);
-                  }}
-                  className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-white text-[11px] og-medium"
-                >
-                  Open Feed ({alerts.length})
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {socialPopupBannerElement}
 
       {/* Strict 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-30 h-14 glass-panel border-b border-white/[0.08] px-4 sm:px-8 flex items-center justify-between gap-4 sm:gap-8">
@@ -1292,24 +1441,23 @@ export default function App() {
                 </button>
               </div>
 
-              {/* OS Browser Push Notification Permission Toggle Card */}
+              {/* OS & Mobile Social Pop-Up Notification Test Card */}
               <div className="p-3.5 rounded-2xl bg-[#0b210e] border border-[#d0ff45]/35 flex items-center justify-between gap-3">
                 <div className="space-y-0.5">
                   <p className="text-xs og-bold text-white">
-                    OS &amp; Browser Push Alerts
+                    Live Pop-Up &amp; Push Alerts
                   </p>
                   <p className="text-[11px] text-zinc-300">
-                    {browserPushPermission === 'granted'
-                      ? 'Active — Pops up on your phone/desktop like Instagram & Facebook'
-                      : 'Enable native browser push banners alongside in-app pop-ups'}
+                    Pops up at the top of your phone &amp; PC screen with sound &amp; vibration like Instagram &amp; Facebook
                   </p>
                 </div>
                 <button
                   type="button"
+                  data-testid="test-popup-notification-btn"
                   onClick={handleEnableBrowserPush}
                   className="px-3.5 py-2 rounded-full bg-[#d0ff45] text-[#041206] text-xs og-bold shrink-0"
                 >
-                  {browserPushPermission === 'granted' ? 'Test Pop-Up' : 'Enable Push'}
+                  Test Pop-Up
                 </button>
               </div>
 
@@ -1326,6 +1474,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={async () => {
+                    setIsNotifDrawerOpen(false);
                     await handleSendEmailReminder({
                       recipientUserId: activeAssignee.uid,
                       type: 'WARNING_5H',
@@ -2063,6 +2212,7 @@ export default function App() {
             party={party}
             currentUserId={activeViewer.uid}
             isHostOrAdmin={isHostOrAdmin}
+            partyInvitations={partyInvitations}
             onCreateParty={handleCreateHousehold}
             onJoinExistingPartyByCode={handleJoinHouseholdByCode}
             onAddRoommateWithEmail={handleAddRoommateWithEmail}

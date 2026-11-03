@@ -12,6 +12,7 @@ import {
   rotatePartyTurn,
   type EmailAlertType,
   type EmailDispatchLog,
+  type HouseholdInvitation,
   type HouseholdMember,
   type OfficialMailerStatus,
   type PartyAlertItem,
@@ -22,6 +23,8 @@ import {
 } from './trashDutyLogic';
 
 const CLIENT_STORE_KEY = 'bindrop_universal_store_v4';
+const REMOTE_CLOUD_BACKEND_ORIGIN =
+  'https://ais-pre-4giwacrrrnzs57w425ll2q-100623098623.asia-east1.run.app';
 const AVATAR_COLORS = ['#d0ff45', '#34d399', '#38bdf8', '#facc15', '#fb7185', '#a78bfa'];
 
 interface StoredClientUser {
@@ -43,6 +46,7 @@ interface ClientStoreShape {
   historyByParty: Record<string, TurnHistoryRecord[]>;
   emailsByParty: Record<string, EmailDispatchLog[]>;
   alertsByParty: Record<string, PartyAlertItem[]>;
+  invitations: HouseholdInvitation[];
   deletedPartyIds: string[];
   leftPartyKeys: string[];
   appPassword?: string;
@@ -67,6 +71,10 @@ function loadClientStore(): ClientStoreShape {
         historyByParty: parsed.historyByParty || {},
         emailsByParty: parsed.emailsByParty || {},
         alertsByParty: parsed.alertsByParty || {},
+        invitations: (parsed.invitations || []).map((inv) => ({
+          ...inv,
+          inviteCode: formatSixCharInviteCode(inv.inviteCode),
+        })),
         deletedPartyIds: parsed.deletedPartyIds || [],
         leftPartyKeys: parsed.leftPartyKeys || [],
         appPassword: parsed.appPassword || 'EzKen_2005',
@@ -83,6 +91,7 @@ function loadClientStore(): ClientStoreShape {
     historyByParty: {},
     emailsByParty: {},
     alertsByParty: {},
+    invitations: [],
     deletedPartyIds: [],
     leftPartyKeys: [],
     appPassword: 'EzKen_2005',
@@ -96,6 +105,20 @@ function saveClientStore(store: ClientStoreShape) {
   } catch {
     // ignore quota errors
   }
+}
+
+function getPendingClientInvitationsForEmail(
+  store: ClientStoreShape,
+  email?: string | null
+): HouseholdInvitation[] {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) return [];
+  return (store.invitations || []).filter(
+    (inv) =>
+      inv.status === 'PENDING' &&
+      inv.invitedEmail.toLowerCase() === cleanEmail &&
+      !store.deletedPartyIds.includes(inv.partyId)
+  );
 }
 
 function randomId(prefix: string): string {
@@ -376,6 +399,7 @@ function buildClientBundle(store: ClientStoreShape, partyId: string) {
     history: store.historyByParty[partyId] || [],
     emails: store.emailsByParty[partyId] || [],
     alerts: store.alertsByParty[partyId] || [],
+    partyInvitations: (store.invitations || []).filter((inv) => inv.partyId === partyId),
     mailerStatus: getClientMailerStatus(store),
   };
 }
@@ -445,6 +469,7 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
     delete store.historyByParty[delId];
     delete store.emailsByParty[delId];
     delete store.alertsByParty[delId];
+    store.invitations = (store.invitations || []).filter((inv) => inv.partyId !== delId);
     for (const acc of Object.values(store.accounts)) {
       if (acc.partyId === delId) {
         acc.partyId = null;
@@ -482,6 +507,7 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
     history?: TurnHistoryRecord[];
     emails?: EmailDispatchLog[];
     alerts?: PartyAlertItem[];
+    partyInvitations?: HouseholdInvitation[];
   } | null;
 
   if (bundle && bundle.party) {
@@ -492,6 +518,39 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
     if (bundle.history) store.historyByParty[pid] = bundle.history;
     if (bundle.emails) store.emailsByParty[pid] = bundle.emails;
     if (bundle.alerts) store.alertsByParty[pid] = bundle.alerts;
+    if (Array.isArray(bundle.partyInvitations)) {
+      for (const inv of bundle.partyInvitations) {
+        const idx = store.invitations.findIndex((i) => i.id === inv.id);
+        if (idx >= 0) {
+          store.invitations[idx] = inv;
+        } else {
+          store.invitations.unshift(inv);
+        }
+      }
+    }
+    changed = true;
+  }
+
+  if (Array.isArray(data.invitations)) {
+    for (const inv of data.invitations as HouseholdInvitation[]) {
+      const idx = store.invitations.findIndex((i) => i.id === inv.id);
+      if (idx >= 0) {
+        store.invitations[idx] = inv;
+      } else {
+        store.invitations.unshift(inv);
+      }
+    }
+    changed = true;
+  }
+
+  if (data.invitation && typeof data.invitation === 'object') {
+    const inv = data.invitation as HouseholdInvitation;
+    const idx = store.invitations.findIndex((i) => i.id === inv.id);
+    if (idx >= 0) {
+      store.invitations[idx] = inv;
+    } else {
+      store.invitations.unshift(inv);
+    }
     changed = true;
   }
 
@@ -544,6 +603,7 @@ async function executeClientFallbackRoute(
         data: {
           user: acc,
           bundle: activeParty ? buildClientBundle(store, activeParty.id) : null,
+          invitations: getPendingClientInvitationsForEmail(store, email),
         },
       };
     }
@@ -555,10 +615,11 @@ async function executeClientFallbackRoute(
         data: {
           user: null,
           bundle: buildClientBundle(store, partyId),
+          invitations: [],
         },
       };
     }
-    return { ok: true, status: 200, data: { user: null, bundle: null } };
+    return { ok: true, status: 200, data: { user: null, bundle: null, invitations: [] } };
   }
 
   // 2. POST /api/auth/google-sync
@@ -870,6 +931,7 @@ async function executeClientFallbackRoute(
       data: {
         user: acc,
         bundle: buildClientBundle(store, partyId),
+        invitations: getPendingClientInvitationsForEmail(store, acc.email),
       },
     };
   }
@@ -969,6 +1031,19 @@ async function executeClientFallbackRoute(
       });
     }
 
+    if (Array.isArray(store.invitations)) {
+      for (const inv of store.invitations) {
+        if (
+          inv.partyId === matchingParty.id &&
+          inv.invitedEmail.toLowerCase() === cleanEmail &&
+          inv.status === 'PENDING'
+        ) {
+          inv.status = 'ACCEPTED';
+          inv.respondedAt = nowIso;
+        }
+      }
+    }
+
     saveClientStore(store);
     return {
       ok: true,
@@ -976,11 +1051,12 @@ async function executeClientFallbackRoute(
       data: {
         user: acc,
         bundle: buildClientBundle(store, matchingParty.id),
+        invitations: getPendingClientInvitationsForEmail(store, cleanEmail),
       },
     };
   }
 
-  // 7. POST /api/party/add-member
+  // 7. POST /api/party/add-member (Send Household Invitation by Email)
   if (pathname === '/api/party/add-member') {
     const party = store.parties[body.partyId];
     if (!party) {
@@ -1010,64 +1086,58 @@ async function executeClientFallbackRoute(
       };
     }
 
-    store.leftPartyKeys = store.leftPartyKeys.filter(
-      (k) => k !== `${cleanEmail}:${party.id}`
-    );
+    const hostMember =
+      party.members.find((m) => m.uid === party.hostId || m.role === 'HOST') ||
+      party.members[0];
 
-    let acc = store.accounts[cleanEmail];
-    if (!acc) {
-      acc = {
-        uid: randomId('u'),
-        email: cleanEmail,
-        displayName: cleanName,
-        avatarColor: AVATAR_COLORS[party.members.length % AVATAR_COLORS.length],
-        partyId: party.id,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-      store.accounts[cleanEmail] = acc;
-    } else {
-      acc.partyId = party.id;
-      acc.displayName = cleanName;
-      acc.updatedAt = nowIso;
+    if (!Array.isArray(store.invitations)) {
+      store.invitations = [];
     }
 
-    const newMember: HouseholdMember = {
-      uid: acc.uid,
-      email: acc.email,
-      displayName: cleanName,
-      photoURL: acc.photoURL,
-      avatarColor: acc.avatarColor,
-      role: 'MEMBER',
-      totalDrops: 0,
-      onTimeDrops: 0,
-      missedDrops: 0,
-      points: 0,
-      currentStreak: 0,
-      bestStreak: 0,
-      onTimeRate: 100,
-      joinedAt: nowIso,
-    };
+    let invitation = store.invitations.find(
+      (inv) =>
+        inv.partyId === party.id &&
+        inv.invitedEmail.toLowerCase() === cleanEmail &&
+        inv.status === 'PENDING'
+    );
 
-    party.memberIds.push(newMember.uid);
-    party.members.push(newMember);
-    party.updatedAt = nowIso;
+    if (invitation) {
+      invitation.invitedName = cleanName;
+      invitation.createdAt = nowIso;
+    } else {
+      invitation = {
+        id: randomId('inv'),
+        partyId: party.id,
+        partyName: party.name,
+        inviteCode: party.inviteCode,
+        rotationIntervalHours: party.rotationIntervalHours,
+        hostId: hostMember?.uid || party.hostId,
+        hostName: hostMember?.displayName || party.hostEmail.split('@')[0],
+        hostEmail: hostMember?.email || party.hostEmail,
+        hostPhotoURL: hostMember?.photoURL,
+        invitedName: cleanName,
+        invitedEmail: cleanEmail,
+        status: 'PENDING',
+        createdAt: nowIso,
+      };
+      store.invitations.unshift(invitation);
+    }
 
     if (!store.alertsByParty[party.id]) store.alertsByParty[party.id] = [];
     store.alertsByParty[party.id].unshift({
-      id: randomId('alert_added'),
+      id: randomId('alert_invite_sent'),
       partyId: party.id,
-      targetUserId: newMember.uid,
-      targetDisplayName: newMember.displayName,
-      targetEmail: newMember.email,
-      assigneeUserId: newMember.uid,
-      assigneeDisplayName: newMember.displayName,
-      senderName: newMember.displayName,
-      senderPhotoURL: newMember.photoURL,
-      title: `👋 Roommate Added to ${party.name}`,
-      category: 'MEMBER_JOINED',
+      targetUserId: party.hostId,
+      targetDisplayName: cleanName,
+      targetEmail: cleanEmail,
+      assigneeUserId: party.hostId,
+      assigneeDisplayName: cleanName,
+      senderName: hostMember?.displayName || 'Host',
+      senderPhotoURL: hostMember?.photoURL,
+      title: `📩 Household Invite Sent to ${cleanName}`,
+      category: 'HOUSEHOLD_INVITE',
       type: 'TURN_REMINDER',
-      message: `${newMember.displayName} (${newMember.email}) was added to the household rotation!`,
+      message: `${cleanName} (${cleanEmail}) received an invitation to join ${party.name} (Code: ${party.inviteCode}). It now appears in their Invitations tab!`,
       read: false,
       createdAt: nowIso,
     });
@@ -1076,7 +1146,134 @@ async function executeClientFallbackRoute(
     return {
       ok: true,
       status: 200,
-      data: { bundle: buildClientBundle(store, party.id) },
+      data: {
+        invitation,
+        bundle: buildClientBundle(store, party.id),
+      },
+    };
+  }
+
+  // 7A-2. POST /api/party/respond-invite
+  if (pathname === '/api/party/respond-invite') {
+    const cleanEmail = String(body.userEmail || '').trim().toLowerCase();
+    const decision = String(body.decision || '').toUpperCase();
+    if (!Array.isArray(store.invitations)) store.invitations = [];
+
+    const invitation = store.invitations.find((inv) => inv.id === body.invitationId);
+    if (!invitation) {
+      return { ok: false, status: 404, data: { error: 'Invitation not found or expired.' } };
+    }
+
+    if (decision === 'DECLINE') {
+      invitation.status = 'DECLINED';
+      invitation.respondedAt = nowIso;
+      saveClientStore(store);
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          invitations: getPendingClientInvitationsForEmail(store, cleanEmail),
+        },
+      };
+    }
+
+    const party = store.parties[invitation.partyId];
+    if (!party || store.deletedPartyIds.includes(party.id)) {
+      invitation.status = 'DECLINED';
+      invitation.respondedAt = nowIso;
+      saveClientStore(store);
+      return {
+        ok: false,
+        status: 404,
+        data: { error: 'This household party no longer exists.' },
+      };
+    }
+
+    invitation.status = 'ACCEPTED';
+    invitation.respondedAt = nowIso;
+
+    store.leftPartyKeys = store.leftPartyKeys.filter(
+      (k) => k !== `${cleanEmail}:${party.id}`
+    );
+
+    let acc = store.accounts[cleanEmail];
+    const uid = body.userUid || acc?.uid || randomId('u');
+    const displayName = String(
+      body.userDisplayName || acc?.displayName || invitation.invitedName || cleanEmail.split('@')[0]
+    ).trim();
+
+    if (!acc) {
+      acc = {
+        uid,
+        email: cleanEmail,
+        displayName,
+        photoURL: body.userPhotoURL,
+        avatarColor: AVATAR_COLORS[party.members.length % AVATAR_COLORS.length],
+        partyId: party.id,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      store.accounts[cleanEmail] = acc;
+    } else {
+      acc.partyId = party.id;
+      acc.displayName = displayName;
+      if (body.userPhotoURL) acc.photoURL = body.userPhotoURL;
+      acc.updatedAt = nowIso;
+    }
+
+    const existingMember = party.members.find(
+      (m) => m.uid === acc.uid || m.email.toLowerCase() === cleanEmail
+    );
+    if (!existingMember) {
+      const newMember: HouseholdMember = {
+        uid: acc.uid,
+        email: acc.email,
+        displayName: acc.displayName,
+        photoURL: acc.photoURL,
+        avatarColor: AVATAR_COLORS[party.members.length % AVATAR_COLORS.length],
+        role: 'MEMBER',
+        totalDrops: 0,
+        onTimeDrops: 0,
+        missedDrops: 0,
+        points: 0,
+        currentStreak: 0,
+        bestStreak: 0,
+        onTimeRate: 100,
+        joinedAt: nowIso,
+      };
+      party.memberIds.push(newMember.uid);
+      party.members.push(newMember);
+      party.updatedAt = nowIso;
+
+      if (!store.alertsByParty[party.id]) store.alertsByParty[party.id] = [];
+      store.alertsByParty[party.id].unshift({
+        id: randomId('alert_invite_accepted'),
+        partyId: party.id,
+        targetUserId: party.hostId,
+        targetDisplayName: party.hostEmail,
+        targetEmail: party.hostEmail,
+        assigneeUserId: newMember.uid,
+        assigneeDisplayName: newMember.displayName,
+        senderName: newMember.displayName,
+        senderPhotoURL: newMember.photoURL,
+        title: `🎉 ${newMember.displayName} Accepted Your Invite!`,
+        category: 'MEMBER_JOINED',
+        type: 'TURN_REMINDER',
+        message: `${newMember.displayName} (${newMember.email}) accepted the invitation and joined ${party.name}!`,
+        read: false,
+        createdAt: nowIso,
+      });
+    }
+
+    saveClientStore(store);
+    return {
+      ok: true,
+      status: 200,
+      data: {
+        user: acc,
+        bundle: buildClientBundle(store, party.id),
+        invitations: getPendingClientInvitationsForEmail(store, cleanEmail),
+      },
     };
   }
 
@@ -1812,22 +2009,34 @@ export async function apiFetch<T = any>(
     const urlObj = new URL(endpoint, window.location.origin);
     const pathname = urlObj.pathname;
 
-    // Attach cachedBundle on auth/session sync so backend server restores any party created before an update
+    // Attach cachedBundle, cachedParties, and cachedInvitations on auth/session/party sync
+    // so any party or invitation created on PC or Phone syncs across devices immediately
     if (
       pathname === '/api/session' ||
       pathname === '/api/auth/login' ||
       pathname === '/api/auth/register' ||
-      pathname === '/api/auth/google-sync'
+      pathname === '/api/auth/google-sync' ||
+      pathname === '/api/party/create' ||
+      pathname === '/api/party/join' ||
+      pathname === '/api/party/add-member' ||
+      pathname === '/api/party/respond-invite'
     ) {
       const store = loadClientStore();
       const bodyObj = options?.body ? JSON.parse(String(options.body)) : {};
-      const email = String(bodyObj.email || urlObj.searchParams.get('email') || '')
+      const email = String(
+        bodyObj.email || bodyObj.userEmail || bodyObj.hostEmail || urlObj.searchParams.get('email') || ''
+      )
         .trim()
         .toLowerCase();
       const partyId = String(bodyObj.partyId || urlObj.searchParams.get('partyId') || '').trim();
       const cachedBundle = getInitialCachedBundleForAccount(email, partyId);
+      const cachedParties = Object.values(store.parties);
+      const cachedInvitations = Array.isArray(store.invitations) ? store.invitations : [];
 
-      if (cachedBundle && (!options?.method || options.method.toUpperCase() === 'POST')) {
+      if (
+        (cachedBundle || cachedParties.length > 0 || cachedInvitations.length > 0) &&
+        (!options?.method || options.method.toUpperCase() === 'POST')
+      ) {
         finalOptions = {
           ...options,
           method: 'POST',
@@ -1837,9 +2046,15 @@ export async function apiFetch<T = any>(
           },
           body: JSON.stringify({
             ...bodyObj,
-            email: email || bodyObj.email,
-            partyId: partyId || bodyObj.partyId || cachedBundle.party.id,
+            ...(pathname === '/api/session'
+              ? {
+                  email: email || bodyObj.email,
+                  partyId: partyId || bodyObj.partyId || cachedBundle?.party?.id,
+                }
+              : {}),
             cachedBundle,
+            cachedParties,
+            cachedInvitations,
           }),
         };
       }
@@ -1854,6 +2069,32 @@ export async function apiFetch<T = any>(
       trimmed.startsWith('<') ||
       !contentType.toLowerCase().includes('application/json')
     ) {
+      // Static host like Netlify (`bindrop.netlify.app`) returned index.html for `/api/*`.
+      // Bridge to our shared Cloud Run backend so PC and Mobile share the exact same database!
+      if (window.location.origin !== REMOTE_CLOUD_BACKEND_ORIGIN) {
+        try {
+          const remoteUrl = `${REMOTE_CLOUD_BACKEND_ORIGIN}${pathname}${urlObj.search}`;
+          const remoteRes = await fetch(remoteUrl, finalOptions);
+          const remoteType = remoteRes.headers.get('content-type') || '';
+          const remoteText = (await remoteRes.text()).trim();
+          if (
+            !remoteText.startsWith('<') &&
+            remoteType.toLowerCase().includes('application/json')
+          ) {
+            const remoteParsed = JSON.parse(remoteText);
+            if (remoteRes.ok) {
+              mirrorServerPayloadToClientStore(remoteParsed);
+            }
+            return {
+              ok: remoteRes.ok,
+              status: remoteRes.status,
+              data: remoteParsed as T,
+            };
+          }
+        } catch {
+          // If remote cloud backend is unreachable, fall through to local fallback store
+        }
+      }
       return await executeClientFallbackRoute(endpoint, finalOptions);
     }
 

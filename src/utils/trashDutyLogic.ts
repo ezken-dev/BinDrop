@@ -129,6 +129,23 @@ export interface EmailDispatchLog {
   transportInfo: string;
 }
 
+export interface HouseholdInvitation {
+  id: string;
+  partyId: string;
+  partyName: string;
+  inviteCode: string;
+  rotationIntervalHours: number;
+  hostId: string;
+  hostName: string;
+  hostEmail: string;
+  hostPhotoURL?: string;
+  invitedEmail: string;
+  invitedName: string;
+  status: 'PENDING' | 'ACCEPTED' | 'DECLINED';
+  createdAt: string;
+  respondedAt?: string;
+}
+
 export interface PartyAlertItem {
   id: string;
   partyId: string;
@@ -147,6 +164,8 @@ export interface PartyAlertItem {
     | 'PHOTO_SUBMITTED'
     | 'PHOTO_VERIFIED'
     | 'MEMBER_JOINED'
+    | 'HOUSEHOLD_INVITE'
+    | 'MANUAL_NUDGE'
     | 'PARTY_UPDATED';
   type:
     | 'WARNING_5H'

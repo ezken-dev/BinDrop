@@ -20,6 +20,7 @@ import {
   rotatePartyTurn,
   type EmailAlertType,
   type EmailDispatchLog,
+  type HouseholdInvitation,
   type HouseholdMember,
   type OfficialMailerStatus,
   type PartyAlertItem,
@@ -67,6 +68,7 @@ interface PersistentStore {
   historyByParty: Record<string, TurnHistoryRecord[]>;
   emailsByParty: Record<string, EmailDispatchLog[]>;
   alertsByParty: Record<string, PartyAlertItem[]>;
+  invitations: HouseholdInvitation[];
   deletedPartyIds: string[];
   leftPartyKeys: string[];
   officialEmailConfig: OfficialEmailConfig;
@@ -129,6 +131,10 @@ function loadStore(): PersistentStore {
         historyByParty: parsed.historyByParty || {},
         emailsByParty: parsed.emailsByParty || {},
         alertsByParty: parsed.alertsByParty || {},
+        invitations: (parsed.invitations || []).map((inv) => ({
+          ...inv,
+          inviteCode: formatSixCharInviteCode(inv.inviteCode),
+        })),
         deletedPartyIds: parsed.deletedPartyIds || [],
         leftPartyKeys: parsed.leftPartyKeys || [],
         officialEmailConfig: existingCfg
@@ -158,6 +164,7 @@ function loadStore(): PersistentStore {
     historyByParty: {},
     emailsByParty: {},
     alertsByParty: {},
+    invitations: [],
     deletedPartyIds: [],
     leftPartyKeys: [],
     officialEmailConfig: {
@@ -181,6 +188,34 @@ function saveStore() {
   } catch (err) {
     console.error('Failed to persist store:', err);
   }
+}
+
+function getPendingInvitationsForEmail(email?: string | null): HouseholdInvitation[] {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) return [];
+  return store.invitations
+    .filter(
+      (inv) =>
+        inv.status === 'PENDING' &&
+        inv.invitedEmail.toLowerCase() === cleanEmail &&
+        !store.deletedPartyIds.includes(inv.partyId) &&
+        Boolean(store.parties[inv.partyId])
+    )
+    .map((inv) => {
+      const liveParty = store.parties[inv.partyId];
+      return {
+        ...inv,
+        partyName: liveParty?.name || inv.partyName,
+        inviteCode: formatSixCharInviteCode(liveParty?.inviteCode || inv.inviteCode),
+        rotationIntervalHours:
+          liveParty?.rotationIntervalHours || inv.rotationIntervalHours || 24,
+      };
+    });
+}
+
+function getPartyInvitations(partyId: string): HouseholdInvitation[] {
+  if (!partyId || store.deletedPartyIds.includes(partyId)) return [];
+  return store.invitations.filter((inv) => inv.partyId === partyId);
 }
 
 /**
@@ -274,38 +309,50 @@ function resolveUserPartyAndSyncMember(
 }
 
 /**
- * Restores a client's cached party bundle into the server store if the server restarted
- * after a deployment/update and the party was not explicitly deleted.
+ * Restores a client's cached party bundle and any locally created parties/invitations
+ * into the server store so that parties created on PC or mobile (including Netlify fallback)
+ * are always discoverable by 6-character code or email invitation across all devices.
  */
 function hydrateClientCachedBundleIfNeeded(
   cachedBundle: any,
-  userEmail?: string
+  userEmail?: string,
+  cachedParties?: PartyState[],
+  cachedInvitations?: HouseholdInvitation[]
 ) {
-  if (!cachedBundle || !cachedBundle.party || !cachedBundle.party.id) return;
-  const incomingParty = cachedBundle.party as PartyState;
-  const pid = incomingParty.id;
-  if (store.deletedPartyIds.includes(pid)) return;
+  let dirty = false;
   const cleanEmail = (userEmail || '').trim().toLowerCase();
-  if (cleanEmail && store.leftPartyKeys.includes(`${pid}:${cleanEmail}`)) return;
 
-  incomingParty.inviteCode = formatSixCharInviteCode(incomingParty.inviteCode);
+  const ingestParty = (incomingParty: PartyState) => {
+    if (!incomingParty || !incomingParty.id) return;
+    const pid = incomingParty.id;
+    if (store.deletedPartyIds.includes(pid)) return;
+    if (cleanEmail && store.leftPartyKeys.includes(`${pid}:${cleanEmail}`)) return;
 
-  const existingParty = store.parties[pid];
-  if (!existingParty) {
-    store.parties[pid] = incomingParty;
-    if (Array.isArray(cachedBundle.drops) && !store.dropsByParty[pid]) {
-      store.dropsByParty[pid] = cachedBundle.drops;
+    incomingParty.inviteCode = formatSixCharInviteCode(incomingParty.inviteCode);
+    const existingParty = store.parties[pid];
+    if (!existingParty) {
+      store.parties[pid] = incomingParty;
+      dirty = true;
+    } else {
+      // If incoming party has members not yet in existingParty, merge them
+      for (const m of incomingParty.members || []) {
+        const mMail = (m.email || '').trim().toLowerCase();
+        if (
+          mMail &&
+          !store.leftPartyKeys.includes(`${pid}:${mMail}`) &&
+          !existingParty.members.some(
+            (em) => em.uid === m.uid || em.email.toLowerCase() === mMail
+          )
+        ) {
+          existingParty.members.push(m);
+          if (!existingParty.memberIds.includes(m.uid)) {
+            existingParty.memberIds.push(m.uid);
+          }
+          dirty = true;
+        }
+      }
     }
-    if (Array.isArray(cachedBundle.history) && !store.historyByParty[pid]) {
-      store.historyByParty[pid] = cachedBundle.history;
-    }
-    if (Array.isArray(cachedBundle.emails) && !store.emailsByParty[pid]) {
-      store.emailsByParty[pid] = cachedBundle.emails;
-    }
-    if (Array.isArray(cachedBundle.alerts) && !store.alertsByParty[pid]) {
-      store.alertsByParty[pid] = cachedBundle.alerts;
-    }
-    // Also ensure every member in incomingParty has an account entry so they can log in from any device
+
     for (const member of incomingParty.members || []) {
       const mEmail = (member.email || '').trim().toLowerCase();
       if (mEmail && !store.accounts[mEmail]) {
@@ -320,8 +367,62 @@ function hydrateClientCachedBundleIfNeeded(
           createdAt: incomingParty.createdAt || new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
+        dirty = true;
       }
     }
+  };
+
+  if (cachedBundle && cachedBundle.party && cachedBundle.party.id) {
+    const pid = cachedBundle.party.id;
+    ingestParty(cachedBundle.party as PartyState);
+    if (!store.deletedPartyIds.includes(pid)) {
+      if (Array.isArray(cachedBundle.drops) && !store.dropsByParty[pid]) {
+        store.dropsByParty[pid] = cachedBundle.drops;
+        dirty = true;
+      }
+      if (Array.isArray(cachedBundle.history) && !store.historyByParty[pid]) {
+        store.historyByParty[pid] = cachedBundle.history;
+        dirty = true;
+      }
+      if (Array.isArray(cachedBundle.emails) && !store.emailsByParty[pid]) {
+        store.emailsByParty[pid] = cachedBundle.emails;
+        dirty = true;
+      }
+      if (Array.isArray(cachedBundle.alerts) && !store.alertsByParty[pid]) {
+        store.alertsByParty[pid] = cachedBundle.alerts;
+        dirty = true;
+      }
+    }
+  }
+
+  if (Array.isArray(cachedParties)) {
+    for (const p of cachedParties) {
+      ingestParty(p);
+    }
+  }
+
+  if (Array.isArray(cachedInvitations)) {
+    for (const inv of cachedInvitations) {
+      if (!inv || !inv.id || !inv.partyId || store.deletedPartyIds.includes(inv.partyId)) {
+        continue;
+      }
+      const existingInv = store.invitations.find(
+        (e) =>
+          e.id === inv.id ||
+          (e.partyId === inv.partyId &&
+            e.invitedEmail.toLowerCase() === inv.invitedEmail.toLowerCase())
+      );
+      if (!existingInv) {
+        store.invitations.unshift({
+          ...inv,
+          inviteCode: formatSixCharInviteCode(inv.inviteCode),
+        });
+        dirty = true;
+      }
+    }
+  }
+
+  if (dirty) {
     saveStore();
   }
 }
@@ -716,6 +817,7 @@ async function buildPartyBundle(partyId: string) {
     history: store.historyByParty[partyId] || [],
     emails: store.emailsByParty[partyId] || [],
     alerts: store.alertsByParty[partyId] || [],
+    partyInvitations: getPartyInvitations(partyId),
     officialSenderEmail: OFFICIAL_BINDROP_EMAIL,
     mailerStatus: getMailerStatusSnapshot(),
   };
@@ -723,6 +825,19 @@ async function buildPartyBundle(partyId: string) {
 
 async function startServer() {
   const app = express();
+
+  // Enable CORS so static frontends (e.g. bindrop.netlify.app) and mobile browsers
+  // can sync parties, 6-character invite codes, and email invitations with this backend.
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '15mb' }));
 
   // Background 10-second automated deadline & pop-up notification monitor
@@ -777,7 +892,15 @@ async function startServer() {
 
   // --- AUTHENTICATION ENDPOINTS ---
   app.post('/api/auth/register', async (req, res) => {
-    const { email, password, displayName, photoURL, cachedBundle } = req.body || {};
+    const {
+      email,
+      password,
+      displayName,
+      photoURL,
+      cachedBundle,
+      cachedParties,
+      cachedInvitations,
+    } = req.body || {};
     const cleanEmail = String(email || '').trim().toLowerCase();
     const cleanName = String(displayName || '').trim();
     const rawPass = String(password || '');
@@ -796,12 +919,16 @@ async function startServer() {
       return res.status(400).json({ error: 'Password must be at least 4 characters.' });
     }
 
-    hydrateClientCachedBundleIfNeeded(cachedBundle, cleanEmail);
+    hydrateClientCachedBundleIfNeeded(
+      cachedBundle,
+      cleanEmail,
+      cachedParties,
+      cachedInvitations
+    );
 
     const nowIso = new Date().toISOString();
     let acc = store.accounts[cleanEmail];
     if (acc) {
-      // If account was pre-enrolled by a Host adding their email to a party, upgrade their password & profile seamlessly!
       acc.displayName = cleanName;
       acc.passwordHash = hashPassword(rawPass);
       if (photoURL) acc.photoURL = photoURL;
@@ -836,11 +963,12 @@ async function startServer() {
         partyId: resolvedPartyId || null,
       },
       bundle,
+      invitations: getPendingInvitationsForEmail(cleanEmail),
     });
   });
 
   app.post('/api/auth/login', async (req, res) => {
-    const { email, password, cachedBundle } = req.body || {};
+    const { email, password, cachedBundle, cachedParties, cachedInvitations } = req.body || {};
     const cleanEmail = String(email || '').trim().toLowerCase();
     const rawPass = String(password || '');
 
@@ -848,7 +976,12 @@ async function startServer() {
       return res.status(400).json({ error: 'Please enter both your email address and password.' });
     }
 
-    hydrateClientCachedBundleIfNeeded(cachedBundle, cleanEmail);
+    hydrateClientCachedBundleIfNeeded(
+      cachedBundle,
+      cleanEmail,
+      cachedParties,
+      cachedInvitations
+    );
 
     // Built-in support for the official BinDrop email account login as well
     if (
@@ -870,7 +1003,6 @@ async function startServer() {
     }
 
     let existing = store.accounts[cleanEmail];
-    // If user's email is already a member of an active household party, ensure their account is linked
     if (!existing) {
       const memberParty = Object.values(store.parties).find(
         (p) =>
@@ -919,17 +1051,32 @@ async function startServer() {
         partyId: resolvedPartyId || null,
       },
       bundle,
+      invitations: getPendingInvitationsForEmail(cleanEmail),
     });
   });
 
   app.post('/api/auth/google-sync', async (req, res) => {
-    const { uid, email, displayName, photoURL, preferredPartyId, cachedBundle } = req.body || {};
+    const {
+      uid,
+      email,
+      displayName,
+      photoURL,
+      preferredPartyId,
+      cachedBundle,
+      cachedParties,
+      cachedInvitations,
+    } = req.body || {};
     const cleanEmail = String(email || '').trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes('@')) {
       return res.status(400).json({ error: 'Please enter a valid Google email address.' });
     }
 
-    hydrateClientCachedBundleIfNeeded(cachedBundle, cleanEmail);
+    hydrateClientCachedBundleIfNeeded(
+      cachedBundle,
+      cleanEmail,
+      cachedParties,
+      cachedInvitations
+    );
 
     const nowIso = new Date().toISOString();
     let account = store.accounts[cleanEmail];
@@ -967,6 +1114,7 @@ async function startServer() {
         partyId: resolvedPartyId || null,
       },
       bundle,
+      invitations: getPendingInvitationsForEmail(cleanEmail),
     });
   });
 
@@ -977,16 +1125,22 @@ async function startServer() {
     uid?: string;
     photoURL?: string;
     cachedBundle?: any;
+    cachedParties?: PartyState[];
+    cachedInvitations?: HouseholdInvitation[];
   }) => {
     const cleanEmail = params.email.trim().toLowerCase();
     const partyId = params.partyId.trim();
 
-    hydrateClientCachedBundleIfNeeded(params.cachedBundle, cleanEmail);
+    hydrateClientCachedBundleIfNeeded(
+      params.cachedBundle,
+      cleanEmail,
+      params.cachedParties,
+      params.cachedInvitations
+    );
 
     if (cleanEmail) {
       let acc = store.accounts[cleanEmail];
       if (!acc) {
-        // Check if this email belongs to any active party or if we have user metadata from the client session
         const nowIso = new Date().toISOString();
         acc = {
           uid: params.uid || `u_${crypto.randomBytes(6).toString('hex')}`,
@@ -1014,6 +1168,7 @@ async function startServer() {
           partyId: resolvedPartyId || null,
         },
         bundle,
+        invitations: getPendingInvitationsForEmail(cleanEmail),
       };
     }
 
@@ -1021,10 +1176,11 @@ async function startServer() {
       return {
         user: null,
         bundle: await buildPartyBundle(partyId),
+        invitations: [],
       };
     }
 
-    return { user: null, bundle: null };
+    return { user: null, bundle: null, invitations: [] };
   };
 
   app.get('/api/session', async (req, res) => {
@@ -1036,7 +1192,16 @@ async function startServer() {
   });
 
   app.post('/api/session', async (req, res) => {
-    const { email, partyId, displayName, uid, photoURL, cachedBundle } = req.body || {};
+    const {
+      email,
+      partyId,
+      displayName,
+      uid,
+      photoURL,
+      cachedBundle,
+      cachedParties,
+      cachedInvitations,
+    } = req.body || {};
     const result = await handleSessionLookup({
       email: String(email || ''),
       partyId: String(partyId || ''),
@@ -1044,11 +1209,13 @@ async function startServer() {
       uid: uid ? String(uid) : undefined,
       photoURL: photoURL ? String(photoURL) : undefined,
       cachedBundle,
+      cachedParties,
+      cachedInvitations,
     });
     return res.json(result);
   });
 
-  // --- HOUSEHOLD PARTY CREATION, 6-CHAR INVITE CODE JOIN, LEAVE & DELETE ---
+  // --- HOUSEHOLD PARTY CREATION, 6-CHAR INVITE CODE JOIN, INVITATIONS, LEAVE & DELETE ---
   app.post('/api/party/create', async (req, res) => {
     const {
       userUid,
@@ -1058,6 +1225,8 @@ async function startServer() {
       name,
       rotationIntervalHours = 24,
       initialDeadlineHours,
+      cachedParties,
+      cachedInvitations,
     } = req.body || {};
 
     const cleanEmail = String(userEmail || '').trim().toLowerCase();
@@ -1068,6 +1237,8 @@ async function startServer() {
     if (cleanPartyName.length < 2) {
       return res.status(400).json({ error: 'Household name must be at least 2 characters.' });
     }
+
+    hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
 
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
@@ -1179,11 +1350,20 @@ async function startServer() {
         partyId,
       },
       bundle: await buildPartyBundle(partyId),
+      invitations: getPendingInvitationsForEmail(cleanEmail),
     });
   });
 
   app.post('/api/party/join', async (req, res) => {
-    const { inviteCode, userUid, userEmail, userDisplayName, userPhotoURL } = req.body || {};
+    const {
+      inviteCode,
+      userUid,
+      userEmail,
+      userDisplayName,
+      userPhotoURL,
+      cachedParties,
+      cachedInvitations,
+    } = req.body || {};
     const normalizedCode = String(inviteCode || '').trim().toUpperCase();
     const cleanEmail = String(userEmail || '').trim().toLowerCase();
 
@@ -1194,6 +1374,8 @@ async function startServer() {
       return res.status(400).json({ error: 'Please sign in with your email first.' });
     }
 
+    hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
+
     const matchingParty = Object.values(store.parties).find(
       (p) =>
         !store.deletedPartyIds.includes(p.id) &&
@@ -1202,13 +1384,20 @@ async function startServer() {
 
     if (!matchingParty) {
       return res.status(404).json({
-        error: `No household party found matching 6-character code "${normalizedCode}". Check the code with your Host or create a new household.`,
+        error: `No household party found matching 6-character code "${normalizedCode}". Check the code with your Host or check your Invitations tab.`,
       });
     }
 
     // Clear any previous "left" marker if the roommate is re-joining via invite code
     store.leftPartyKeys = store.leftPartyKeys.filter(
       (k) => k !== `${matchingParty.id}:${cleanEmail}`
+    );
+
+    // Mark any pending email invitation for this party & user as ACCEPTED
+    store.invitations = store.invitations.map((inv) =>
+      inv.partyId === matchingParty.id && inv.invitedEmail.toLowerCase() === cleanEmail
+        ? { ...inv, status: 'ACCEPTED' }
+        : inv
     );
 
     const nowIso = new Date().toISOString();
@@ -1302,12 +1491,189 @@ async function startServer() {
         partyId: matchingParty.id,
       },
       bundle: await buildPartyBundle(matchingParty.id),
+      invitations: getPendingInvitationsForEmail(cleanEmail),
+    });
+  });
+
+  // Accept or Decline a Household Email Invitation from the Invitations Tab
+  app.post('/api/party/respond-invite', async (req, res) => {
+    const {
+      invitationId,
+      partyId,
+      inviteCode,
+      decision = 'ACCEPT',
+      userUid,
+      userEmail,
+      userDisplayName,
+      userPhotoURL,
+      cachedParties,
+      cachedInvitations,
+    } = req.body || {};
+
+    const cleanEmail = String(userEmail || '').trim().toLowerCase();
+    if (!cleanEmail) {
+      return res.status(400).json({ error: 'Please sign in with your email first.' });
+    }
+
+    hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
+
+    const inv = store.invitations.find(
+      (i) =>
+        (invitationId && i.id === invitationId) ||
+        (partyId &&
+          i.partyId === partyId &&
+          i.invitedEmail.toLowerCase() === cleanEmail) ||
+        (inviteCode &&
+          doesInviteCodeMatch(i.inviteCode, String(inviteCode)) &&
+          i.invitedEmail.toLowerCase() === cleanEmail)
+    );
+
+    if (decision === 'DECLINE') {
+      if (inv) {
+        inv.status = 'DECLINED';
+        saveStore();
+      }
+      return res.json({
+        ok: true,
+        decision: 'DECLINED',
+        invitations: getPendingInvitationsForEmail(cleanEmail),
+      });
+    }
+
+    const targetParty =
+      (inv && store.parties[inv.partyId]) ||
+      (partyId && store.parties[partyId]) ||
+      (inviteCode &&
+        Object.values(store.parties).find(
+          (p) =>
+            !store.deletedPartyIds.includes(p.id) &&
+            doesInviteCodeMatch(p.inviteCode, String(inviteCode))
+        ));
+
+    if (!targetParty || store.deletedPartyIds.includes(targetParty.id)) {
+      if (inv) {
+        inv.status = 'DECLINED';
+        saveStore();
+      }
+      return res.status(404).json({
+        error: 'This household party is no longer active.',
+        invitations: getPendingInvitationsForEmail(cleanEmail),
+      });
+    }
+
+    if (inv) {
+      inv.status = 'ACCEPTED';
+    }
+    store.invitations = store.invitations.map((item) =>
+      item.partyId === targetParty.id && item.invitedEmail.toLowerCase() === cleanEmail
+        ? { ...item, status: 'ACCEPTED' }
+        : item
+    );
+
+    store.leftPartyKeys = store.leftPartyKeys.filter(
+      (k) => k !== `${targetParty.id}:${cleanEmail}`
+    );
+
+    const nowIso = new Date().toISOString();
+    let acc = store.accounts[cleanEmail];
+    const uid = userUid || acc?.uid || `u_${crypto.randomBytes(6).toString('hex')}`;
+    const displayName = String(
+      userDisplayName || inv?.invitedName || acc?.displayName || cleanEmail.split('@')[0]
+    ).trim();
+
+    if (!acc) {
+      acc = {
+        uid,
+        email: cleanEmail,
+        displayName,
+        passwordHash: hashPassword(crypto.randomUUID()),
+        photoURL: userPhotoURL,
+        avatarColor: AVATAR_COLORS[targetParty.members.length % AVATAR_COLORS.length],
+        partyId: targetParty.id,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      store.accounts[cleanEmail] = acc;
+    } else {
+      acc.partyId = targetParty.id;
+      acc.displayName = displayName;
+      if (userPhotoURL) acc.photoURL = userPhotoURL;
+      acc.updatedAt = nowIso;
+    }
+
+    const existingMember = targetParty.members.find(
+      (m: HouseholdMember) => m.uid === acc.uid || m.email.toLowerCase() === cleanEmail
+    );
+
+    if (!existingMember) {
+      const newMember: HouseholdMember = {
+        uid: acc.uid,
+        email: acc.email,
+        displayName: acc.displayName,
+        photoURL: acc.photoURL,
+        avatarColor: AVATAR_COLORS[targetParty.members.length % AVATAR_COLORS.length],
+        role: 'MEMBER',
+        totalDrops: 0,
+        onTimeDrops: 0,
+        missedDrops: 0,
+        points: 0,
+        currentStreak: 0,
+        bestStreak: 0,
+        onTimeRate: 100,
+        joinedAt: nowIso,
+      };
+      targetParty.memberIds.push(newMember.uid);
+      targetParty.members.push(newMember);
+      targetParty.updatedAt = nowIso;
+
+      if (!store.alertsByParty[targetParty.id]) {
+        store.alertsByParty[targetParty.id] = [];
+      }
+      store.alertsByParty[targetParty.id].unshift({
+        id: `alert_accept_${Date.now()}`,
+        partyId: targetParty.id,
+        targetUserId: targetParty.hostId,
+        targetDisplayName: targetParty.name,
+        targetEmail: targetParty.hostEmail,
+        assigneeUserId: newMember.uid,
+        assigneeDisplayName: newMember.displayName,
+        senderName: newMember.displayName,
+        senderPhotoURL: newMember.photoURL,
+        title: `🎉 ${newMember.displayName} Accepted Your Party Invite!`,
+        category: 'MEMBER_JOINED',
+        type: 'TURN_REMINDER',
+        message: `${newMember.displayName} (${newMember.email}) accepted the invitation and joined "${targetParty.name}"!`,
+        read: false,
+        createdAt: nowIso,
+      });
+    } else {
+      existingMember.uid = acc.uid;
+      existingMember.displayName = acc.displayName;
+      if (acc.photoURL) existingMember.photoURL = acc.photoURL;
+      targetParty.memberIds = targetParty.members.map((m: HouseholdMember) => m.uid);
+    }
+
+    saveStore();
+    return res.json({
+      ok: true,
+      decision: 'ACCEPTED',
+      user: {
+        uid: acc.uid,
+        email: acc.email,
+        displayName: acc.displayName,
+        photoURL: acc.photoURL,
+        avatarColor: acc.avatarColor,
+        partyId: targetParty.id,
+      },
+      bundle: await buildPartyBundle(targetParty.id),
+      invitations: getPendingInvitationsForEmail(cleanEmail),
     });
   });
 
   // Leave Current Household Party (Roommates exit; if Host leaves, transfers Host role to next roommate or deletes if empty)
   app.post('/api/party/leave', async (req, res) => {
-    const { partyId, userUid, userEmail } = req.body || {};
+    const { partyId, userUid, userId, userEmail } = req.body || {};
+    const callerUid = String(userUid || userId || '');
     const cleanEmail = String(userEmail || '').trim().toLowerCase();
     const party = store.parties[partyId];
     if (!party) {
@@ -1333,7 +1699,7 @@ async function startServer() {
     }
 
     const nowIso = new Date().toISOString();
-    const leaveResult = leavePartyMember(party, String(userUid || ''), cleanEmail, nowIso);
+    const leaveResult = leavePartyMember(party, callerUid, cleanEmail, nowIso);
 
     if (cleanEmail) {
       const leftKey = `${partyId}:${cleanEmail}`;
@@ -1346,7 +1712,7 @@ async function startServer() {
       }
     }
     for (const acc of Object.values(store.accounts)) {
-      if (acc.uid === userUid && acc.partyId === partyId) {
+      if (acc.uid === callerUid && acc.partyId === partyId) {
         acc.partyId = undefined;
         acc.updatedAt = nowIso;
       }
@@ -1413,7 +1779,8 @@ async function startServer() {
 
   // Delete Household Party (Host Only — permanently dissolves the party for all members)
   app.post('/api/party/delete', async (req, res) => {
-    const { partyId, userUid, userEmail } = req.body || {};
+    const { partyId, userUid, userId, userEmail } = req.body || {};
+    const callerUid = String(userUid || userId || '');
     const cleanEmail = String(userEmail || '').trim().toLowerCase();
     const party = store.parties[partyId];
 
@@ -1440,11 +1807,11 @@ async function startServer() {
     }
 
     const isHostCaller =
-      party.hostId === userUid ||
+      party.hostId === callerUid ||
       party.hostEmail.toLowerCase() === cleanEmail ||
       party.members.some(
         (m) =>
-          (m.uid === userUid || m.email.toLowerCase() === cleanEmail) &&
+          (m.uid === callerUid || m.email.toLowerCase() === cleanEmail) &&
           m.role === 'HOST'
       ) ||
       cleanEmail === OFFICIAL_BINDROP_EMAIL;
@@ -1478,6 +1845,7 @@ async function startServer() {
     delete store.historyByParty[partyId];
     delete store.emailsByParty[partyId];
     delete store.alertsByParty[partyId];
+    store.invitations = store.invitations.filter((inv) => inv.partyId !== partyId);
 
     saveStore();
     const acc = cleanEmail ? store.accounts[cleanEmail] : undefined;
@@ -1513,8 +1881,11 @@ async function startServer() {
     });
   });
 
+  // Send a Household Party Invitation by Email (shows up in the recipient's Invitations Tab)
   app.post('/api/party/add-member', async (req, res) => {
-    const { partyId, memberName, memberEmail } = req.body || {};
+    const { partyId, memberName, memberEmail, cachedParties, cachedInvitations } = req.body || {};
+    hydrateClientCachedBundleIfNeeded(null, undefined, cachedParties, cachedInvitations);
+
     const party = store.parties[partyId];
     if (!party) {
       return res.status(404).json({ error: 'Household party not found.' });
@@ -1528,7 +1899,7 @@ async function startServer() {
     }
     if (!cleanEmail || !cleanEmail.includes('@')) {
       return res.status(400).json({
-        error: 'Please enter a valid email address so their account automatically links to this party.',
+        error: 'Please enter a valid email address so they receive the invitation in their Invitations tab.',
       });
     }
     if (party.members.some((m) => m.email.toLowerCase() === cleanEmail)) {
@@ -1541,66 +1912,64 @@ async function startServer() {
     store.leftPartyKeys = store.leftPartyKeys.filter((k) => k !== `${party.id}:${cleanEmail}`);
 
     const nowIso = new Date().toISOString();
-    let acc = store.accounts[cleanEmail];
-    if (!acc) {
-      acc = {
-        uid: `u_${crypto.randomBytes(6).toString('hex')}`,
-        email: cleanEmail,
-        displayName: cleanName,
-        passwordHash: hashPassword('bindrop123'),
-        avatarColor: AVATAR_COLORS[party.members.length % AVATAR_COLORS.length],
-        partyId: party.id,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-      store.accounts[cleanEmail] = acc;
-    } else {
-      acc.partyId = party.id;
-      acc.displayName = cleanName;
-      acc.updatedAt = nowIso;
-    }
+    const hostMember =
+      party.members.find((m) => m.uid === party.hostId) || party.members[0];
+    const formattedCode = formatSixCharInviteCode(party.inviteCode);
 
-    const newMember: HouseholdMember = {
-      uid: acc.uid,
-      email: acc.email,
-      displayName: cleanName,
-      photoURL: acc.photoURL,
-      avatarColor: acc.avatarColor,
-      role: 'MEMBER',
-      totalDrops: 0,
-      onTimeDrops: 0,
-      missedDrops: 0,
-      points: 0,
-      currentStreak: 0,
-      bestStreak: 0,
-      onTimeRate: 100,
-      joinedAt: nowIso,
+    // Create or refresh PENDING HouseholdInvitation for this email address
+    const existingInviteIdx = store.invitations.findIndex(
+      (inv) =>
+        inv.partyId === party.id &&
+        inv.invitedEmail.toLowerCase() === cleanEmail
+    );
+
+    const invitationRecord: HouseholdInvitation = {
+      id:
+        existingInviteIdx >= 0
+          ? store.invitations[existingInviteIdx].id
+          : `inv_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      partyId: party.id,
+      partyName: party.name,
+      inviteCode: formattedCode,
+      rotationIntervalHours: party.rotationIntervalHours,
+      hostId: party.hostId,
+      hostName: hostMember?.displayName || party.hostEmail,
+      hostEmail: party.hostEmail,
+      invitedEmail: cleanEmail,
+      invitedName: cleanName,
+      status: 'PENDING',
+      createdAt: nowIso,
     };
 
-    party.memberIds.push(newMember.uid);
-    party.members.push(newMember);
-    party.updatedAt = nowIso;
+    if (existingInviteIdx >= 0) {
+      store.invitations[existingInviteIdx] = invitationRecord;
+    } else {
+      store.invitations.unshift(invitationRecord);
+    }
 
     if (!store.alertsByParty[party.id]) store.alertsByParty[party.id] = [];
     store.alertsByParty[party.id].unshift({
-      id: `alert_enroll_${Date.now()}`,
+      id: `alert_invite_${Date.now()}`,
       partyId: party.id,
-      targetUserId: newMember.uid,
-      targetDisplayName: newMember.displayName,
-      targetEmail: newMember.email,
-      assigneeUserId: newMember.uid,
-      assigneeDisplayName: newMember.displayName,
-      senderName: party.name,
-      title: `Roommate Enrolled · ${newMember.displayName}`,
-      category: 'MEMBER_JOINED',
+      targetUserId: party.hostId,
+      targetDisplayName: cleanName,
+      targetEmail: cleanEmail,
+      assigneeUserId: party.currentTurnUserId,
+      assigneeDisplayName: cleanName,
+      senderName: hostMember?.displayName || party.name,
+      title: `📩 Invitation Sent to ${cleanName} (${cleanEmail})`,
+      category: 'HOUSEHOLD_INVITE',
       type: 'TURN_REMINDER',
-      message: `${newMember.displayName} (${newMember.email}) was added to ${party.name}! When they sign in on any device, they will automatically join this party.`,
+      message: `${hostMember?.displayName || 'Host'} invited ${cleanName} (${cleanEmail}) to join "${party.name}" (Code: ${formattedCode}). It is now waiting in their Invitations tab!`,
       read: false,
       createdAt: nowIso,
     });
 
     saveStore();
-    return res.json({ bundle: await buildPartyBundle(party.id) });
+    return res.json({
+      invitation: invitationRecord,
+      bundle: await buildPartyBundle(party.id),
+    });
   });
 
   // Upload a Trash Disposal Photo (either PENDING_HOST_APPROVAL or immediately VERIFIED by Host)
