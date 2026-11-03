@@ -22,14 +22,16 @@ import {
   type TurnHistoryRecord,
 } from './trashDutyLogic';
 import {
+  addUserLeftKey,
+  deletePartiesFromCloud,
+  isUserLeftKeyMatched,
   pullPartyByInviteCodeFromCloud,
   pushPartyStoreToCloud,
+  removeUserLeftKey,
   syncStoreWithCloud,
 } from './cloudPartySync';
 
 const CLIENT_STORE_KEY = 'bindrop_universal_store_v4';
-const REMOTE_CLOUD_BACKEND_ORIGIN =
-  'https://ais-pre-4giwacrrrnzs57w425ll2q-100623098623.asia-east1.run.app';
 const AVATAR_COLORS = ['#d0ff45', '#34d399', '#38bdf8', '#facc15', '#fb7185', '#a78bfa'];
 
 interface StoredClientUser {
@@ -54,6 +56,7 @@ interface ClientStoreShape {
   invitations: HouseholdInvitation[];
   deletedPartyIds: string[];
   leftPartyKeys: string[];
+  clearedPartyUsers: string[];
   appPassword?: string;
   smtpVerified?: boolean;
 }
@@ -64,7 +67,12 @@ function loadClientStore(): ClientStoreShape {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<ClientStoreShape>;
       const parties = parsed.parties || {};
+      const deletedIds = parsed.deletedPartyIds || [];
       for (const pid of Object.keys(parties)) {
+        if (deletedIds.includes(pid)) {
+          delete parties[pid];
+          continue;
+        }
         if (parties[pid]?.inviteCode) {
           parties[pid].inviteCode = formatSixCharInviteCode(parties[pid].inviteCode);
         }
@@ -80,8 +88,9 @@ function loadClientStore(): ClientStoreShape {
           ...inv,
           inviteCode: formatSixCharInviteCode(inv.inviteCode),
         })),
-        deletedPartyIds: parsed.deletedPartyIds || [],
+        deletedPartyIds: deletedIds,
         leftPartyKeys: parsed.leftPartyKeys || [],
+        clearedPartyUsers: parsed.clearedPartyUsers || [],
         appPassword: parsed.appPassword || 'EzKen_2005',
         smtpVerified: Boolean(parsed.smtpVerified),
       };
@@ -99,6 +108,7 @@ function loadClientStore(): ClientStoreShape {
     invitations: [],
     deletedPartyIds: [],
     leftPartyKeys: [],
+    clearedPartyUsers: [],
     appPassword: 'EzKen_2005',
     smtpVerified: false,
   };
@@ -156,7 +166,7 @@ function resolveClientUserParty(
     preferredPartyId &&
     store.parties[preferredPartyId] &&
     !store.deletedPartyIds.includes(preferredPartyId) &&
-    !store.leftPartyKeys.includes(`${cleanEmail}:${preferredPartyId}`)
+    !isUserLeftKeyMatched(store.leftPartyKeys, preferredPartyId, cleanEmail)
   ) {
     const p = store.parties[preferredPartyId];
     if (
@@ -173,7 +183,7 @@ function resolveClientUserParty(
     acc.partyId &&
     store.parties[acc.partyId] &&
     !store.deletedPartyIds.includes(acc.partyId) &&
-    !store.leftPartyKeys.includes(`${cleanEmail}:${acc.partyId}`)
+    !isUserLeftKeyMatched(store.leftPartyKeys, acc.partyId, cleanEmail)
   ) {
     const p = store.parties[acc.partyId];
     if (
@@ -185,12 +195,18 @@ function resolveClientUserParty(
     }
   }
 
+  // If the user explicitly deleted or left their household party, do NOT auto-match an older party
+  if (store.clearedPartyUsers.includes(cleanEmail)) {
+    acc.partyId = null;
+    return null;
+  }
+
   const matchedParty = Object.values(store.parties)
     .filter(
       (p) =>
         p &&
         !store.deletedPartyIds.includes(p.id) &&
-        !store.leftPartyKeys.includes(`${cleanEmail}:${p.id}`)
+        !isUserLeftKeyMatched(store.leftPartyKeys, p.id, cleanEmail)
     )
     .sort(
       (a, b) =>
@@ -421,6 +437,10 @@ export function getInitialCachedBundleForAccount(
   const store = loadClientStore();
   const cleanEmail = (email || '').trim().toLowerCase();
 
+  if (cleanEmail && store.clearedPartyUsers.includes(cleanEmail) && !partyId) {
+    return null;
+  }
+
   if (cleanEmail && store.accounts[cleanEmail]) {
     const acc = store.accounts[cleanEmail];
     const resolved = resolveClientUserParty(store, acc, partyId);
@@ -428,23 +448,24 @@ export function getInitialCachedBundleForAccount(
       saveClientStore(store);
       return buildClientBundle(store, resolved.id);
     }
+    return null;
   }
 
   if (
     partyId &&
     store.parties[partyId] &&
     !store.deletedPartyIds.includes(partyId) &&
-    (!cleanEmail || !store.leftPartyKeys.includes(`${cleanEmail}:${partyId}`))
+    (!cleanEmail || !isUserLeftKeyMatched(store.leftPartyKeys, partyId, cleanEmail))
   ) {
     return buildClientBundle(store, partyId);
   }
 
-  if (cleanEmail) {
+  if (cleanEmail && !store.clearedPartyUsers.includes(cleanEmail)) {
     const fallbackParty = Object.values(store.parties).find(
       (p) =>
         p &&
         !store.deletedPartyIds.includes(p.id) &&
-        !store.leftPartyKeys.includes(`${cleanEmail}:${p.id}`) &&
+        !isUserLeftKeyMatched(store.leftPartyKeys, p.id, cleanEmail) &&
         p.members.some((m) => m.email.toLowerCase() === cleanEmail)
     );
     if (fallbackParty) {
@@ -464,8 +485,19 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
   const store = loadClientStore();
   let changed = false;
 
+  const allDeletedIds: string[] = [];
   if (typeof data.deletedPartyId === 'string' && data.deletedPartyId) {
-    const delId = data.deletedPartyId;
+    allDeletedIds.push(data.deletedPartyId);
+  }
+  if (Array.isArray(data.deletedPartyIds)) {
+    for (const id of data.deletedPartyIds) {
+      if (typeof id === 'string' && id && !allDeletedIds.includes(id)) {
+        allDeletedIds.push(id);
+      }
+    }
+  }
+
+  for (const delId of allDeletedIds) {
     if (!store.deletedPartyIds.includes(delId)) {
       store.deletedPartyIds.push(delId);
     }
@@ -487,11 +519,41 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
   if (user && user.email) {
     const cleanEmail = user.email.trim().toLowerCase();
     if (typeof data.leftPartyId === 'string' && data.leftPartyId) {
-      const leftKey = `${cleanEmail}:${data.leftPartyId}`;
-      if (!store.leftPartyKeys.includes(leftKey)) {
-        store.leftPartyKeys.push(leftKey);
+      addUserLeftKey(store.leftPartyKeys, data.leftPartyId, cleanEmail);
+    }
+    if (Array.isArray(data.leftPartyIds)) {
+      for (const lid of data.leftPartyIds) {
+        if (typeof lid === 'string' && lid) {
+          addUserLeftKey(store.leftPartyKeys, lid, cleanEmail);
+        }
       }
     }
+    if (user.partyId) {
+      store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+      store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, user.partyId, cleanEmail);
+    } else if (allDeletedIds.length > 0 || data.leftPartyId || data.dissolved) {
+      if (!store.clearedPartyUsers.includes(cleanEmail)) {
+        store.clearedPartyUsers.push(cleanEmail);
+      }
+      // Also purge any older local parties for this user so they can never resurrect
+      for (const p of Object.values(store.parties)) {
+        if (!p) continue;
+        const isUserInParty =
+          p.hostId === user.uid ||
+          p.hostEmail.toLowerCase() === cleanEmail ||
+          p.members.some((m) => m.uid === user.uid || m.email.toLowerCase() === cleanEmail);
+        if (isUserInParty) {
+          addUserLeftKey(store.leftPartyKeys, p.id, cleanEmail);
+          if (p.hostId === user.uid || p.hostEmail.toLowerCase() === cleanEmail) {
+            if (!store.deletedPartyIds.includes(p.id)) {
+              store.deletedPartyIds.push(p.id);
+            }
+            delete store.parties[p.id];
+          }
+        }
+      }
+    }
+
     store.accounts[cleanEmail] = {
       ...(store.accounts[cleanEmail] || {}),
       uid: user.uid,
@@ -515,7 +577,7 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
     partyInvitations?: HouseholdInvitation[];
   } | null;
 
-  if (bundle && bundle.party) {
+  if (bundle && bundle.party && !store.deletedPartyIds.includes(bundle.party.id)) {
     const pid = bundle.party.id;
     bundle.party.inviteCode = formatSixCharInviteCode(bundle.party.inviteCode);
     store.parties[pid] = bundle.party;
@@ -538,6 +600,7 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
 
   if (Array.isArray(data.invitations)) {
     for (const inv of data.invitations as HouseholdInvitation[]) {
+      if (store.deletedPartyIds.includes(inv.partyId)) continue;
       const idx = store.invitations.findIndex((i) => i.id === inv.id);
       if (idx >= 0) {
         store.invitations[idx] = inv;
@@ -561,7 +624,7 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
 
   if (changed) {
     saveClientStore(store);
-    pushPartyStoreToCloud(store).catch(() => {});
+    pushPartyStoreToCloud(store, bundle?.party?.id).catch(() => {});
   }
 }
 
@@ -579,13 +642,33 @@ async function executeClientFallbackRoute(
   const body = options?.body ? JSON.parse(String(options.body)) : {};
   const nowIso = new Date().toISOString();
 
-  // Pull & merge latest shared parties, 6-char invite codes, and invitations from Cloud Firestore
-  await syncStoreWithCloud(store, {
-    email: String(body.email || body.userEmail || url.searchParams.get('email') || '').trim() || undefined,
-    partyId: String(body.partyId || url.searchParams.get('partyId') || '').trim() || undefined,
-    inviteCode: String(body.inviteCode || '').trim() || undefined,
-  });
-  saveClientStore(store);
+  // Only await bounded cloud sync on routes that look up cross-device codes or sessions
+  if (
+    pathname === '/api/party/join' ||
+    pathname === '/api/party/respond-invite' ||
+    pathname === '/api/session'
+  ) {
+    await syncStoreWithCloud(store, {
+      email:
+        String(body.email || body.userEmail || url.searchParams.get('email') || '').trim() ||
+        undefined,
+      partyId:
+        String(body.partyId || url.searchParams.get('partyId') || '').trim() || undefined,
+      inviteCode: String(body.inviteCode || '').trim() || undefined,
+    });
+    saveClientStore(store);
+  } else {
+    // Non-blocking background cloud sync for auth, create, leave, delete so UI responds in <20ms
+    syncStoreWithCloud(store, {
+      email:
+        String(body.email || body.userEmail || url.searchParams.get('email') || '').trim() ||
+        undefined,
+      partyId:
+        String(body.partyId || url.searchParams.get('partyId') || '').trim() || undefined,
+    })
+      .then(() => saveClientStore(store))
+      .catch(() => {});
+  }
 
   // 1. GET or POST /api/session
   if (pathname === '/api/session') {
@@ -938,8 +1021,11 @@ async function executeClientFallbackRoute(
       },
     ];
 
+    store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+    store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, partyId, cleanEmail);
+
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, partyId);
+    pushPartyStoreToCloud(store, partyId).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -1030,9 +1116,8 @@ async function executeClientFallbackRoute(
       };
     }
 
-    store.leftPartyKeys = store.leftPartyKeys.filter(
-      (k) => k !== `${cleanEmail}:${matchingParty.id}`
-    );
+    store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+    store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, matchingParty.id, cleanEmail);
 
     let acc = store.accounts[cleanEmail];
     const uid = body.userUid || acc?.uid || randomId('u');
@@ -1117,7 +1202,7 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, matchingParty.id);
+    pushPartyStoreToCloud(store, matchingParty.id).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -1216,7 +1301,7 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, party.id);
+    pushPartyStoreToCloud(store, party.id).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -1266,9 +1351,8 @@ async function executeClientFallbackRoute(
     invitation.status = 'ACCEPTED';
     invitation.respondedAt = nowIso;
 
-    store.leftPartyKeys = store.leftPartyKeys.filter(
-      (k) => k !== `${cleanEmail}:${party.id}`
-    );
+    store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+    store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, party.id, cleanEmail);
 
     let acc = store.accounts[cleanEmail];
     const uid = body.userUid || acc?.uid || randomId('u');
@@ -1340,7 +1424,7 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, party.id);
+    pushPartyStoreToCloud(store, party.id).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -1354,23 +1438,29 @@ async function executeClientFallbackRoute(
 
   // 7B. POST /api/party/leave
   if (pathname === '/api/party/leave') {
-    const party = store.parties[body.partyId];
-    if (!party) {
-      return { ok: false, status: 404, data: { error: 'Household party not found.' } };
-    }
     const cleanEmail = String(body.userEmail || '').trim().toLowerCase();
-    const leaveKey = `${cleanEmail}:${party.id}`;
-    if (cleanEmail && !store.leftPartyKeys.includes(leaveKey)) {
-      store.leftPartyKeys.push(leaveKey);
+    const callerUid = String(body.userId || body.userUid || '');
+    const party = store.parties[body.partyId];
+
+    if (cleanEmail && !store.clearedPartyUsers.includes(cleanEmail)) {
+      store.clearedPartyUsers.push(cleanEmail);
     }
 
-    const result = leavePartyMember(party, body.userId || '', cleanEmail, nowIso);
+    // Mark ALL parties where this user is listed as left so no older party can resurrect
+    for (const p of Object.values(store.parties)) {
+      if (!p) continue;
+      if (
+        p.id === body.partyId ||
+        p.hostId === callerUid ||
+        p.hostEmail.toLowerCase() === cleanEmail ||
+        p.members.some((m) => m.uid === callerUid || m.email.toLowerCase() === cleanEmail)
+      ) {
+        addUserLeftKey(store.leftPartyKeys, p.id, cleanEmail);
+      }
+    }
 
     for (const acc of Object.values(store.accounts)) {
-      if (
-        (acc.uid === body.userId || acc.email.toLowerCase() === cleanEmail) &&
-        acc.partyId === party.id
-      ) {
+      if (acc.uid === callerUid || acc.email.toLowerCase() === cleanEmail) {
         acc.partyId = null;
         acc.updatedAt = nowIso;
       }
@@ -1378,7 +1468,25 @@ async function executeClientFallbackRoute(
 
     const updatedUser = cleanEmail ? store.accounts[cleanEmail] || null : null;
 
+    if (!party) {
+      saveClientStore(store);
+      pushPartyStoreToCloud(store).catch(() => {});
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          user: updatedUser,
+          bundle: null,
+          dissolved: true,
+          leftPartyId: body.partyId,
+        },
+      };
+    }
+
+    const result = leavePartyMember(party, callerUid, cleanEmail, nowIso);
+
     if (result.dissolved || !result.updatedParty) {
+      const inviteCodeToDelete = party.inviteCode;
       if (!store.deletedPartyIds.includes(party.id)) {
         store.deletedPartyIds.push(party.id);
       }
@@ -1388,6 +1496,7 @@ async function executeClientFallbackRoute(
       delete store.emailsByParty[party.id];
       delete store.alertsByParty[party.id];
       saveClientStore(store);
+      deletePartiesFromCloud(store, [party.id], [inviteCodeToDelete]).catch(() => {});
       return {
         ok: true,
         status: 200,
@@ -1429,6 +1538,7 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
+    pushPartyStoreToCloud(store, party.id).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -1447,48 +1557,96 @@ async function executeClientFallbackRoute(
 
   // 7C. POST /api/party/delete
   if (pathname === '/api/party/delete') {
-    const party = store.parties[body.partyId];
-    if (!party) {
-      return { ok: false, status: 404, data: { error: 'Household party not found.' } };
-    }
     const cleanEmail = String(body.userEmail || '').trim().toLowerCase();
-    const isHost =
-      party.hostId === body.userId ||
-      party.hostEmail.toLowerCase() === cleanEmail ||
-      party.members.some(
-        (m) =>
-          (m.uid === body.userId || m.email.toLowerCase() === cleanEmail) &&
-          m.role === 'HOST'
+    const callerUid = String(body.userId || body.userUid || '');
+    const party = store.parties[body.partyId];
+
+    if (party) {
+      const isHost =
+        party.hostId === callerUid ||
+        party.hostEmail.toLowerCase() === cleanEmail ||
+        party.members.some(
+          (m) =>
+            (m.uid === callerUid || m.email.toLowerCase() === cleanEmail) &&
+            m.role === 'HOST'
+        );
+
+      if (!isHost) {
+        return {
+          ok: false,
+          status: 403,
+          data: { error: 'Only the Party Host can delete the household party for everyone.' },
+        };
+      }
+    }
+
+    const partyName = party?.name || 'Household';
+    const targetPartyId = String(body.partyId || party?.id || '');
+    const deletedIds: string[] = [];
+    const deletedCodes: string[] = [];
+
+    if (targetPartyId) {
+      deletedIds.push(targetPartyId);
+      if (party?.inviteCode) deletedCodes.push(party.inviteCode);
+    }
+
+    if (cleanEmail && !store.clearedPartyUsers.includes(cleanEmail)) {
+      store.clearedPartyUsers.push(cleanEmail);
+    }
+
+    // Also purge any older historical parties where this user was Host or Member so no older party resurrects
+    for (const p of Object.values(store.parties)) {
+      if (!p) continue;
+      const isUserHost =
+        p.hostId === callerUid ||
+        p.hostEmail.toLowerCase() === cleanEmail ||
+        p.members.some(
+          (m) =>
+            (m.uid === callerUid || m.email.toLowerCase() === cleanEmail) &&
+            m.role === 'HOST'
+        );
+      const isUserMember = p.members.some(
+        (m) => m.uid === callerUid || m.email.toLowerCase() === cleanEmail
       );
 
-    if (!isHost) {
-      return {
-        ok: false,
-        status: 403,
-        data: { error: 'Only the Party Host can delete the household party for everyone.' },
-      };
+      if (isUserHost || p.id === targetPartyId) {
+        if (!deletedIds.includes(p.id)) deletedIds.push(p.id);
+        if (p.inviteCode) deletedCodes.push(p.inviteCode);
+        addUserLeftKey(store.leftPartyKeys, p.id, cleanEmail);
+      } else if (isUserMember) {
+        addUserLeftKey(store.leftPartyKeys, p.id, cleanEmail);
+      }
     }
 
-    const partyName = party.name;
-    const targetPartyId = party.id;
-    if (!store.deletedPartyIds.includes(targetPartyId)) {
-      store.deletedPartyIds.push(targetPartyId);
+    for (const delId of deletedIds) {
+      if (!store.deletedPartyIds.includes(delId)) {
+        store.deletedPartyIds.push(delId);
+      }
+      delete store.parties[delId];
+      delete store.dropsByParty[delId];
+      delete store.historyByParty[delId];
+      delete store.emailsByParty[delId];
+      delete store.alertsByParty[delId];
     }
+
+    store.invitations = (store.invitations || []).filter(
+      (inv) => !deletedIds.includes(inv.partyId)
+    );
 
     for (const acc of Object.values(store.accounts)) {
-      if (acc.partyId === targetPartyId) {
+      if (
+        acc.uid === callerUid ||
+        acc.email.toLowerCase() === cleanEmail ||
+        (acc.partyId && deletedIds.includes(acc.partyId))
+      ) {
         acc.partyId = null;
         acc.updatedAt = nowIso;
       }
     }
 
-    delete store.parties[targetPartyId];
-    delete store.dropsByParty[targetPartyId];
-    delete store.historyByParty[targetPartyId];
-    delete store.emailsByParty[targetPartyId];
-    delete store.alertsByParty[targetPartyId];
-
     saveClientStore(store);
+    deletePartiesFromCloud(store, deletedIds, deletedCodes).catch(() => {});
+
     const updatedUser = cleanEmail ? store.accounts[cleanEmail] || null : null;
     return {
       ok: true,
@@ -1497,6 +1655,7 @@ async function executeClientFallbackRoute(
         user: updatedUser,
         bundle: null,
         deletedPartyId: targetPartyId,
+        deletedPartyIds: deletedIds,
         message: `Household party "${partyName}" has been permanently deleted for all members.`,
       },
     };
@@ -2051,7 +2210,7 @@ async function executeClientFallbackRoute(
     if (!store.emailsByParty[party.id]) store.emailsByParty[party.id] = [];
     store.emailsByParty[party.id].unshift(newLog);
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, party.id);
+    pushPartyStoreToCloud(store, party.id).catch(() => {});
 
     return {
       ok: true,
@@ -2097,8 +2256,7 @@ async function executeClientFallbackRoute(
 /**
  * Universal API caller that works both with the Express backend (`server.ts`)
  * AND on static hosts like Netlify (`bindrop.netlify.app`) where `/api/*` returns HTML.
- * Also automatically attaches the client's cached party bundle during session/auth sync
- * so pushing code updates or restarting the server never loses the user's household party.
+ * Never blocks on slow cloud or remote container calls.
  */
 export async function apiFetch<T = any>(
   endpoint: string,
@@ -2109,8 +2267,6 @@ export async function apiFetch<T = any>(
     const urlObj = new URL(endpoint, window.location.origin);
     const pathname = urlObj.pathname;
 
-    // Attach cachedBundle, cachedParties, and cachedInvitations on auth/session/party sync
-    // so any party or invitation created on PC or Phone syncs across devices immediately
     if (
       pathname === '/api/session' ||
       pathname === '/api/auth/login' ||
@@ -2124,35 +2280,41 @@ export async function apiFetch<T = any>(
       const store = loadClientStore();
       const bodyObj = options?.body ? JSON.parse(String(options.body)) : {};
 
-      // Sync with Cloud Firestore before party join or invite response so cross-device codes are always in store.parties
-      if (
-        pathname === '/api/party/join' ||
-        pathname === '/api/party/respond-invite' ||
-        pathname === '/api/party/add-member' ||
-        pathname === '/api/session'
-      ) {
-        await syncStoreWithCloud(store, {
-          email: String(bodyObj.email || bodyObj.userEmail || urlObj.searchParams.get('email') || '').trim() || undefined,
-          partyId: String(bodyObj.partyId || urlObj.searchParams.get('partyId') || '').trim() || undefined,
-          inviteCode: String(bodyObj.inviteCode || '').trim() || undefined,
-        });
-        saveClientStore(store);
-      }
-
       const email = String(
-        bodyObj.email || bodyObj.userEmail || bodyObj.hostEmail || urlObj.searchParams.get('email') || ''
+        bodyObj.email ||
+          bodyObj.userEmail ||
+          bodyObj.hostEmail ||
+          urlObj.searchParams.get('email') ||
+          ''
       )
         .trim()
         .toLowerCase();
       const partyId = String(bodyObj.partyId || urlObj.searchParams.get('partyId') || '').trim();
-      const cachedBundle = getInitialCachedBundleForAccount(email, partyId);
-      const cachedParties = Object.values(store.parties);
-      const cachedInvitations = Array.isArray(store.invitations) ? store.invitations : [];
+      const isClearedUser = Boolean(email && store.clearedPartyUsers.includes(email) && !partyId);
 
-      if (
-        (cachedBundle || cachedParties.length > 0 || cachedInvitations.length > 0) &&
-        (!options?.method || options.method.toUpperCase() === 'POST')
-      ) {
+      // Run cloud sync in background so apiFetch never stalls before sending request
+      if (pathname === '/api/session') {
+        syncStoreWithCloud(store, {
+          email: email || undefined,
+          partyId: partyId || undefined,
+        })
+          .then(() => saveClientStore(store))
+          .catch(() => {});
+      }
+
+      const cachedBundle = isClearedUser ? null : getInitialCachedBundleForAccount(email, partyId);
+      const cachedParties = Object.values(store.parties).filter(
+        (p) =>
+          p &&
+          !store.deletedPartyIds.includes(p.id) &&
+          (!email || !isUserLeftKeyMatched(store.leftPartyKeys, p.id, email)) &&
+          (!isClearedUser || p.id === partyId)
+      );
+      const cachedInvitations = Array.isArray(store.invitations)
+        ? store.invitations.filter((inv) => !store.deletedPartyIds.includes(inv.partyId))
+        : [];
+
+      if (!options?.method || options.method.toUpperCase() === 'POST') {
         finalOptions = {
           ...options,
           method: 'POST',
@@ -2165,18 +2327,32 @@ export async function apiFetch<T = any>(
             ...(pathname === '/api/session'
               ? {
                   email: email || bodyObj.email,
-                  partyId: partyId || bodyObj.partyId || cachedBundle?.party?.id,
+                  partyId: isClearedUser ? '' : partyId || bodyObj.partyId || cachedBundle?.party?.id || '',
+                  noAutoMatch: isClearedUser,
                 }
               : {}),
             cachedBundle,
             cachedParties,
             cachedInvitations,
+            deletedPartyIds: store.deletedPartyIds,
+            leftPartyKeys: store.leftPartyKeys,
           }),
         };
       }
     }
 
-    const res = await fetch(endpoint, finalOptions);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    let res: Response;
+    try {
+      res = await fetch(endpoint, {
+        ...finalOptions,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
     const contentType = res.headers.get('content-type') || '';
     const rawText = await res.text();
     const trimmed = rawText.trim();
@@ -2186,31 +2362,7 @@ export async function apiFetch<T = any>(
       !contentType.toLowerCase().includes('application/json')
     ) {
       // Static host like Netlify (`bindrop.netlify.app`) returned index.html for `/api/*`.
-      // Bridge to our shared Cloud Run backend & Cloud Firestore so PC and Mobile share the exact same database!
-      if (window.location.origin !== REMOTE_CLOUD_BACKEND_ORIGIN) {
-        try {
-          const remoteUrl = `${REMOTE_CLOUD_BACKEND_ORIGIN}${pathname}${urlObj.search}`;
-          const remoteRes = await fetch(remoteUrl, finalOptions);
-          const remoteType = remoteRes.headers.get('content-type') || '';
-          const remoteText = (await remoteRes.text()).trim();
-          if (
-            !remoteText.startsWith('<') &&
-            remoteType.toLowerCase().includes('application/json')
-          ) {
-            const remoteParsed = JSON.parse(remoteText);
-            if (remoteRes.ok) {
-              mirrorServerPayloadToClientStore(remoteParsed);
-              return {
-                ok: remoteRes.ok,
-                status: remoteRes.status,
-                data: remoteParsed as T,
-              };
-            }
-          }
-        } catch {
-          // If remote cloud backend is unreachable, fall through to Cloud Firestore + client store
-        }
-      }
+      // Immediately execute our Cloud Firestore-backed client route without hanging!
       return await executeClientFallbackRoute(endpoint, finalOptions);
     }
 
@@ -2218,7 +2370,6 @@ export async function apiFetch<T = any>(
     if (res.ok) {
       mirrorServerPayloadToClientStore(parsed);
     } else if (pathname === '/api/party/join' && res.status === 404) {
-      // If local Express server didn't have the invite code, check Cloud Firestore fallback
       return await executeClientFallbackRoute(endpoint, finalOptions);
     }
     return {

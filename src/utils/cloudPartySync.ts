@@ -1,5 +1,3 @@
-import { doc, getDoc, getDocFromServer, setDoc } from 'firebase/firestore';
-import { db } from '../firebase';
 import {
   doesInviteCodeMatch,
   formatSixCharInviteCode,
@@ -12,7 +10,9 @@ import {
   type TurnHistoryRecord,
 } from './trashDutyLogic';
 
-const CLOUD_COLLECTION = 'bindrop_cloud';
+const FIRESTORE_REST_BASE =
+  'https://firestore.googleapis.com/v1/projects/gen-lang-client-0842283767/databases/ai-studio-bindropgamifiedh-242575ad-afb8-49a2-a549-049c420eb6f4/documents/bindrop_cloud';
+const CLOUD_TIMEOUT_MS = 1800;
 
 export interface CloudSyncStoreLike {
   parties: Record<string, PartyState>;
@@ -36,28 +36,72 @@ function sanitizeDocId(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
 }
 
+export function isUserLeftKeyMatched(
+  leftPartyKeys: string[],
+  partyId: string,
+  email?: string | null
+): boolean {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !partyId) return false;
+  return (
+    leftPartyKeys.includes(`${cleanEmail}:${partyId}`) ||
+    leftPartyKeys.includes(`${partyId}:${cleanEmail}`)
+  );
+}
+
+export function addUserLeftKey(
+  leftPartyKeys: string[],
+  partyId: string,
+  email?: string | null
+): void {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !partyId) return;
+  const k1 = `${cleanEmail}:${partyId}`;
+  const k2 = `${partyId}:${cleanEmail}`;
+  if (!leftPartyKeys.includes(k1)) leftPartyKeys.push(k1);
+  if (!leftPartyKeys.includes(k2)) leftPartyKeys.push(k2);
+}
+
+export function removeUserLeftKey(
+  leftPartyKeys: string[],
+  partyId: string,
+  email?: string | null
+): string[] {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !partyId) return leftPartyKeys;
+  const k1 = `${cleanEmail}:${partyId}`;
+  const k2 = `${partyId}:${cleanEmail}`;
+  return leftPartyKeys.filter((k) => k !== k1 && k !== k2);
+}
+
+async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = CLOUD_TIMEOUT_MS): Promise<Response | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+    return res;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function readCloudDoc<T = any>(docId: string): Promise<T | null> {
   const safeId = sanitizeDocId(docId);
-  const ref = doc(db, CLOUD_COLLECTION, safeId);
   try {
-    const snap = await getDocFromServer(ref);
-    if (!snap.exists()) return null;
-    const raw = snap.data()?.payloadJson;
+    const res = await fetchWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`);
+    if (!res || !res.ok) return null;
+    const data = (await res.json()) as any;
+    const raw = data?.fields?.payloadJson?.stringValue;
     if (typeof raw === 'string' && raw.length > 0) {
       return JSON.parse(raw) as T;
     }
     return null;
   } catch {
-    try {
-      const fallbackSnap = await getDoc(ref);
-      if (!fallbackSnap.exists()) return null;
-      const raw = fallbackSnap.data()?.payloadJson;
-      if (typeof raw === 'string' && raw.length > 0) {
-        return JSON.parse(raw) as T;
-      }
-    } catch {
-      // ignore offline error
-    }
     return null;
   }
 }
@@ -71,14 +115,31 @@ async function writeCloudDoc(
   const payloadJson = JSON.stringify(payload);
   if (payloadJson.length > 940000) return;
   try {
-    await setDoc(doc(db, CLOUD_COLLECTION, safeId), {
-      docId: safeId,
-      kind,
-      payloadJson,
-      updatedAtIso: new Date().toISOString(),
+    await fetchWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          docId: { stringValue: safeId },
+          kind: { stringValue: kind },
+          payloadJson: { stringValue: payloadJson },
+          updatedAtIso: { stringValue: new Date().toISOString() },
+        },
+      }),
     });
   } catch {
     // ignore transient network errors
+  }
+}
+
+async function deleteCloudDoc(docId: string): Promise<void> {
+  const safeId = sanitizeDocId(docId);
+  try {
+    await fetchWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
+      method: 'DELETE',
+    });
+  } catch {
+    // ignore
   }
 }
 
@@ -86,15 +147,20 @@ async function writeCloudDoc(
  * Merges two PartyState objects that share the same party ID or 6-character invite code,
  * ensuring that Host role, members who joined from other devices, and turn state are preserved.
  */
-export function mergePartyStates(existing: PartyState, incoming: PartyState): PartyState {
+export function mergePartyStates(
+  existing: PartyState,
+  incoming: PartyState,
+  leftPartyKeys: string[] = []
+): PartyState {
   const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
   const incomingTime = new Date(incoming.updatedAt || incoming.createdAt || 0).getTime();
   const primary = incomingTime >= existingTime ? { ...incoming } : { ...existing };
   const secondary = incomingTime >= existingTime ? existing : incoming;
 
-  // If one party has a real Host and the other was a code-join stub, prefer the real Host metadata
-  const existingIsStub = existing.id.startsWith('party_code_') && existing.name.startsWith('Household ');
-  const incomingIsStub = incoming.id.startsWith('party_code_') && incoming.name.startsWith('Household ');
+  const existingIsStub =
+    existing.id.startsWith('party_code_') && existing.name.startsWith('Household ');
+  const incomingIsStub =
+    incoming.id.startsWith('party_code_') && incoming.name.startsWith('Household ');
 
   if (existingIsStub && !incomingIsStub) {
     primary.name = incoming.name;
@@ -112,6 +178,12 @@ export function mergePartyStates(existing: PartyState, incoming: PartyState): Pa
   for (const m of [...(primary.members || []), ...(secondary.members || [])]) {
     if (!m || !m.email) continue;
     const key = m.email.trim().toLowerCase();
+    if (
+      isUserLeftKeyMatched(leftPartyKeys, primary.id, key) ||
+      isUserLeftKeyMatched(leftPartyKeys, secondary.id, key)
+    ) {
+      continue;
+    }
     const prev = mergedMembersMap.get(key);
     if (!prev) {
       mergedMembersMap.set(key, { ...m });
@@ -132,7 +204,6 @@ export function mergePartyStates(existing: PartyState, incoming: PartyState): Pa
   }
 
   const mergedMembers = Array.from(mergedMembersMap.values());
-  // Ensure exactly one HOST matches primary.hostEmail or primary.hostId
   const hostEntry =
     mergedMembers.find(
       (m) =>
@@ -156,7 +227,8 @@ export function mergePartyStates(existing: PartyState, incoming: PartyState): Pa
     primary.currentTurnIndex = 0;
   }
   if (!primary.members.some((m) => m.uid === primary.currentTurnUserId) && primary.members[0]) {
-    primary.currentTurnUserId = primary.members[primary.currentTurnIndex]?.uid || primary.members[0].uid;
+    primary.currentTurnUserId =
+      primary.members[primary.currentTurnIndex]?.uid || primary.members[0].uid;
   }
 
   return primary;
@@ -164,7 +236,7 @@ export function mergePartyStates(existing: PartyState, incoming: PartyState): Pa
 
 /**
  * Pulls a specific party by its 6-character invite code from Cloud Firestore
- * and merges it into the local store.
+ * and merges it into the local store. Bounded by fast REST timeouts so it never hangs.
  */
 export async function pullPartyByInviteCodeFromCloud(
   store: CloudSyncStoreLike,
@@ -173,16 +245,32 @@ export async function pullPartyByInviteCodeFromCloud(
   const cleanCode = cleanAlphanumericCode(rawInviteCode);
   if (cleanCode.length < 4) return null;
 
-  // 1. Check direct invite code document: bindrop_cloud/code_{CLEAN6CHAR}
-  const codeDoc = await readCloudDoc<{
-    partyId: string;
-    inviteCode: string;
-    party: PartyState;
-    drops?: TrashDropLog[];
-    history?: TurnHistoryRecord[];
-    alerts?: PartyAlertItem[];
-    invitations?: HouseholdInvitation[];
-  }>(`code_${cleanCode}`);
+  const [codeDoc, globalDoc] = await Promise.all([
+    readCloudDoc<{
+      partyId: string;
+      inviteCode: string;
+      party: PartyState;
+      drops?: TrashDropLog[];
+      history?: TurnHistoryRecord[];
+      alerts?: PartyAlertItem[];
+      invitations?: HouseholdInvitation[];
+    }>(`code_${cleanCode}`),
+    readCloudDoc<{
+      parties?: Record<string, PartyState>;
+      invitations?: HouseholdInvitation[];
+      deletedPartyIds?: string[];
+      leftPartyKeys?: string[];
+    }>('global_index'),
+  ]);
+
+  if (globalDoc?.deletedPartyIds) {
+    for (const delId of globalDoc.deletedPartyIds) {
+      if (!store.deletedPartyIds.includes(delId)) {
+        store.deletedPartyIds.push(delId);
+      }
+      delete store.parties[delId];
+    }
+  }
 
   if (codeDoc && codeDoc.party && !store.deletedPartyIds.includes(codeDoc.party.id)) {
     const pid = codeDoc.party.id;
@@ -198,7 +286,11 @@ export async function pullPartyByInviteCodeFromCloud(
     remoteParty.inviteCode = formatSixCharInviteCode(remoteParty.inviteCode);
 
     if (store.parties[pid]) {
-      store.parties[pid] = mergePartyStates(store.parties[pid], remoteParty);
+      store.parties[pid] = mergePartyStates(
+        store.parties[pid],
+        remoteParty,
+        store.leftPartyKeys
+      );
     } else {
       store.parties[pid] = remoteParty;
     }
@@ -215,13 +307,6 @@ export async function pullPartyByInviteCodeFromCloud(
     return store.parties[pid];
   }
 
-  // 2. Also check global_index in case party was indexed there
-  const globalDoc = await readCloudDoc<{
-    parties?: Record<string, PartyState>;
-    invitations?: HouseholdInvitation[];
-    deletedPartyIds?: string[];
-  }>('global_index');
-
   if (globalDoc?.parties) {
     for (const remoteParty of Object.values(globalDoc.parties)) {
       if (
@@ -231,7 +316,11 @@ export async function pullPartyByInviteCodeFromCloud(
       ) {
         remoteParty.inviteCode = formatSixCharInviteCode(remoteParty.inviteCode);
         store.parties[remoteParty.id] = store.parties[remoteParty.id]
-          ? mergePartyStates(store.parties[remoteParty.id], remoteParty)
+          ? mergePartyStates(
+              store.parties[remoteParty.id],
+              remoteParty,
+              store.leftPartyKeys
+            )
           : remoteParty;
         return store.parties[remoteParty.id];
       }
@@ -242,218 +331,289 @@ export async function pullPartyByInviteCodeFromCloud(
 }
 
 /**
- * Pushes a specific party and all its invitations/codes up to Cloud Firestore
- * so any other phone, PC, or static host (`bindrop.netlify.app`) can immediately join or sync.
+ * Permanently removes deleted parties and their invite codes from Cloud Firestore
+ * and records their IDs in `global_index.deletedPartyIds` so they never reappear.
+ */
+export async function deletePartiesFromCloud(
+  store: CloudSyncStoreLike,
+  deletedIds: string[],
+  inviteCodes: string[] = []
+): Promise<void> {
+  try {
+    for (const id of deletedIds) {
+      if (id && !store.deletedPartyIds.includes(id)) {
+        store.deletedPartyIds.push(id);
+      }
+      delete store.parties[id];
+    }
+
+    const deleteTasks: Promise<void>[] = [];
+    for (const id of deletedIds) {
+      if (id) deleteTasks.push(deleteCloudDoc(`party_${id}`));
+    }
+    for (const code of inviteCodes) {
+      const clean = cleanAlphanumericCode(code);
+      if (clean.length >= 4) {
+        deleteTasks.push(deleteCloudDoc(`code_${clean}`));
+      }
+    }
+
+    await Promise.allSettled(deleteTasks);
+    await pushPartyStoreToCloud(store);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Pushes a specific party (or top active parties) and global index to Cloud Firestore
+ * using parallel bounded REST calls so it never blocks UI interactions.
  */
 export async function pushPartyStoreToCloud(
   store: CloudSyncStoreLike,
   targetPartyId?: string
 ): Promise<void> {
-  const partyIds = targetPartyId
-    ? [targetPartyId]
-    : Object.keys(store.parties).filter((id) => !store.deletedPartyIds.includes(id));
+  try {
+    const partyIds = targetPartyId
+      ? [targetPartyId]
+      : Object.keys(store.parties)
+          .filter((id) => !store.deletedPartyIds.includes(id))
+          .slice(0, 6);
 
-  for (const pid of partyIds) {
-    const party = store.parties[pid];
-    if (!party || store.deletedPartyIds.includes(pid)) continue;
-    party.inviteCode = formatSixCharInviteCode(party.inviteCode);
-    const cleanCode = cleanAlphanumericCode(party.inviteCode);
+    const writeTasks: Promise<void>[] = [];
 
-    // Strip huge base64 data URLs from cloud index if needed to keep under Firestore 1MB limit
-    const compactDrops = (store.dropsByParty[pid] || []).slice(0, 12);
-    const compactHistory = (store.historyByParty[pid] || []).slice(0, 25);
-    const compactAlerts = (store.alertsByParty[pid] || []).slice(0, 25);
-    const partyInvitations = (store.invitations || []).filter((i) => i.partyId === pid);
+    for (const pid of partyIds) {
+      const party = store.parties[pid];
+      if (!party || store.deletedPartyIds.includes(pid)) continue;
+      party.inviteCode = formatSixCharInviteCode(party.inviteCode);
+      const cleanCode = cleanAlphanumericCode(party.inviteCode);
 
-    await Promise.all([
-      writeCloudDoc(`party_${pid}`, 'PARTY_BUNDLE', {
-        party,
-        drops: compactDrops,
-        history: compactHistory,
-        alerts: compactAlerts,
-        invitations: partyInvitations,
-      }),
-      cleanCode.length >= 4
-        ? writeCloudDoc(`code_${cleanCode}`, 'INVITE_CODE', {
+      const compactDrops = (store.dropsByParty[pid] || []).slice(0, 12);
+      const compactHistory = (store.historyByParty[pid] || []).slice(0, 25);
+      const compactAlerts = (store.alertsByParty[pid] || []).slice(0, 25);
+      const partyInvitations = (store.invitations || []).filter((i) => i.partyId === pid);
+
+      writeTasks.push(
+        writeCloudDoc(`party_${pid}`, 'PARTY_BUNDLE', {
+          party,
+          drops: compactDrops,
+          history: compactHistory,
+          alerts: compactAlerts,
+          invitations: partyInvitations,
+        })
+      );
+
+      if (cleanCode.length >= 4) {
+        writeTasks.push(
+          writeCloudDoc(`code_${cleanCode}`, 'INVITE_CODE', {
             partyId: pid,
             inviteCode: party.inviteCode,
             party,
             alerts: compactAlerts,
             invitations: partyInvitations,
           })
-        : Promise.resolve(),
-    ]);
-  }
-
-  // Also sync global_index and invitations_all
-  const existingGlobal = await readCloudDoc<{
-    parties?: Record<string, PartyState>;
-    invitations?: HouseholdInvitation[];
-    deletedPartyIds?: string[];
-    leftPartyKeys?: string[];
-  }>('global_index');
-
-  const mergedDeleted = Array.from(
-    new Set([...(existingGlobal?.deletedPartyIds || []), ...(store.deletedPartyIds || [])])
-  );
-  const mergedLeft = Array.from(
-    new Set([...(existingGlobal?.leftPartyKeys || []), ...(store.leftPartyKeys || [])])
-  );
-
-  const mergedParties: Record<string, PartyState> = {
-    ...(existingGlobal?.parties || {}),
-  };
-  for (const delId of mergedDeleted) {
-    delete mergedParties[delId];
-  }
-  for (const [pid, localParty] of Object.entries(store.parties)) {
-    if (!localParty || mergedDeleted.includes(pid)) continue;
-    if (mergedParties[pid]) {
-      mergedParties[pid] = mergePartyStates(mergedParties[pid], localParty);
-    } else {
-      mergedParties[pid] = localParty;
-    }
-  }
-
-  const invMap = new Map<string, HouseholdInvitation>();
-  for (const inv of [...(existingGlobal?.invitations || []), ...(store.invitations || [])]) {
-    if (!inv || !inv.id || mergedDeleted.includes(inv.partyId)) continue;
-    const prev = invMap.get(inv.id);
-    if (!prev || inv.status !== 'PENDING') {
-      invMap.set(inv.id, {
-        ...inv,
-        inviteCode: formatSixCharInviteCode(inv.inviteCode),
-      });
-    }
-  }
-  const mergedInvitations = Array.from(invMap.values()).slice(0, 100);
-
-  await Promise.all([
-    writeCloudDoc('global_index', 'GLOBAL_INDEX', {
-      parties: mergedParties,
-      invitations: mergedInvitations,
-      deletedPartyIds: mergedDeleted,
-      leftPartyKeys: mergedLeft,
-    }),
-    writeCloudDoc('invitations_all', 'INVITATIONS', {
-      invitations: mergedInvitations,
-    }),
-  ]);
-}
-
-/**
- * Bidirectional sync between the local store and Cloud Firestore.
- * Ensures that:
- * 1. Any party created on another device is pulled into `store.parties`
- * 2. Any party created locally before or after this update is pushed to `bindrop_cloud/code_{CODE}`
- * 3. If two devices have a party with the same 6-character `inviteCode` (e.g. `MUT-HJZ`), their rosters are merged!
- */
-export async function syncStoreWithCloud(
-  store: CloudSyncStoreLike,
-  opts?: { email?: string; partyId?: string; inviteCode?: string }
-): Promise<void> {
-  try {
-    if (opts?.inviteCode) {
-      await pullPartyByInviteCodeFromCloud(store, opts.inviteCode);
+        );
+      }
     }
 
-    const globalDoc = await readCloudDoc<{
+    const existingGlobal = await readCloudDoc<{
       parties?: Record<string, PartyState>;
       invitations?: HouseholdInvitation[];
       deletedPartyIds?: string[];
       leftPartyKeys?: string[];
     }>('global_index');
 
-    if (globalDoc) {
-      if (Array.isArray(globalDoc.deletedPartyIds)) {
-        for (const delId of globalDoc.deletedPartyIds) {
-          if (!store.deletedPartyIds.includes(delId)) {
-            store.deletedPartyIds.push(delId);
-          }
-          delete store.parties[delId];
-        }
-      }
+    const mergedDeleted = Array.from(
+      new Set([...(existingGlobal?.deletedPartyIds || []), ...(store.deletedPartyIds || [])])
+    );
+    const mergedLeft = Array.from(
+      new Set([...(existingGlobal?.leftPartyKeys || []), ...(store.leftPartyKeys || [])])
+    );
 
-      if (globalDoc.parties) {
-        for (const [remotePid, remoteParty] of Object.entries(globalDoc.parties)) {
-          if (!remoteParty || store.deletedPartyIds.includes(remotePid)) continue;
-          remoteParty.inviteCode = formatSixCharInviteCode(remoteParty.inviteCode);
+    store.deletedPartyIds = mergedDeleted;
+    store.leftPartyKeys = mergedLeft;
 
-          // Check if local store has a party with the exact same 6-char invite code under a different ID
-          const sameCodeLocalParty = Object.values(store.parties).find(
-            (lp) =>
-              lp &&
-              !store.deletedPartyIds.includes(lp.id) &&
-              doesInviteCodeMatch(lp.inviteCode, remoteParty.inviteCode)
-          );
-
-          if (sameCodeLocalParty && sameCodeLocalParty.id !== remotePid) {
-            const merged = mergePartyStates(sameCodeLocalParty, remoteParty);
-            // Prefer non-stub party ID
-            const canonicalId = sameCodeLocalParty.id.startsWith('party_code_')
-              ? remotePid
-              : sameCodeLocalParty.id;
-            merged.id = canonicalId;
-            store.parties[canonicalId] = merged;
-            if (canonicalId !== sameCodeLocalParty.id) {
-              delete store.parties[sameCodeLocalParty.id];
-            }
-          } else if (store.parties[remotePid]) {
-            store.parties[remotePid] = mergePartyStates(store.parties[remotePid], remoteParty);
-          } else {
-            store.parties[remotePid] = remoteParty;
-          }
-        }
-      }
-
-      if (Array.isArray(globalDoc.invitations)) {
-        const invMap = new Map<string, HouseholdInvitation>();
-        for (const inv of [...globalDoc.invitations, ...(store.invitations || [])]) {
-          if (!inv || !inv.id || store.deletedPartyIds.includes(inv.partyId)) continue;
-          const prev = invMap.get(inv.id);
-          if (!prev || inv.status !== 'PENDING') {
-            invMap.set(inv.id, {
-              ...inv,
-              inviteCode: formatSixCharInviteCode(inv.inviteCode),
-            });
-          }
-        }
-        store.invitations = Array.from(invMap.values());
+    const mergedParties: Record<string, PartyState> = {
+      ...(existingGlobal?.parties || {}),
+    };
+    for (const delId of mergedDeleted) {
+      delete mergedParties[delId];
+      delete store.parties[delId];
+    }
+    for (const [pid, localParty] of Object.entries(store.parties)) {
+      if (!localParty || mergedDeleted.includes(pid)) continue;
+      if (mergedParties[pid]) {
+        mergedParties[pid] = mergePartyStates(mergedParties[pid], localParty, mergedLeft);
+      } else {
+        mergedParties[pid] = localParty;
       }
     }
 
-    // Pull detailed bundle for the active partyId if available
-    const activePid = opts?.partyId;
-    if (activePid && !store.deletedPartyIds.includes(activePid)) {
-      const bundleDoc = await readCloudDoc<{
-        party: PartyState;
-        drops?: TrashDropLog[];
-        history?: TurnHistoryRecord[];
-        alerts?: PartyAlertItem[];
-        invitations?: HouseholdInvitation[];
-      }>(`party_${activePid}`);
+    const invMap = new Map<string, HouseholdInvitation>();
+    for (const inv of [...(existingGlobal?.invitations || []), ...(store.invitations || [])]) {
+      if (!inv || !inv.id || mergedDeleted.includes(inv.partyId)) continue;
+      const prev = invMap.get(inv.id);
+      if (!prev || inv.status !== 'PENDING') {
+        invMap.set(inv.id, {
+          ...inv,
+          inviteCode: formatSixCharInviteCode(inv.inviteCode),
+        });
+      }
+    }
+    const mergedInvitations = Array.from(invMap.values()).slice(0, 100);
 
-      if (bundleDoc?.party) {
+    writeTasks.push(
+      writeCloudDoc('global_index', 'GLOBAL_INDEX', {
+        parties: mergedParties,
+        invitations: mergedInvitations,
+        deletedPartyIds: mergedDeleted,
+        leftPartyKeys: mergedLeft,
+      }),
+      writeCloudDoc('invitations_all', 'INVITATIONS', {
+        invitations: mergedInvitations,
+      })
+    );
+
+    await Promise.allSettled(writeTasks);
+  } catch {
+    // ignore transient network errors
+  }
+}
+
+/**
+ * Fast, timeout-bounded sync between the local store and Cloud Firestore.
+ */
+export async function syncStoreWithCloud(
+  store: CloudSyncStoreLike,
+  opts?: { email?: string; partyId?: string; inviteCode?: string }
+): Promise<void> {
+  const runSync = async () => {
+    try {
+      if (opts?.inviteCode) {
+        await pullPartyByInviteCodeFromCloud(store, opts.inviteCode);
+      }
+
+      const activePid = opts?.partyId;
+      const [globalDoc, bundleDoc] = await Promise.all([
+        readCloudDoc<{
+          parties?: Record<string, PartyState>;
+          invitations?: HouseholdInvitation[];
+          deletedPartyIds?: string[];
+          leftPartyKeys?: string[];
+        }>('global_index'),
+        activePid && !store.deletedPartyIds.includes(activePid)
+          ? readCloudDoc<{
+              party: PartyState;
+              drops?: TrashDropLog[];
+              history?: TurnHistoryRecord[];
+              alerts?: PartyAlertItem[];
+              invitations?: HouseholdInvitation[];
+            }>(`party_${activePid}`)
+          : Promise.resolve(null),
+      ]);
+
+      if (globalDoc) {
+        if (Array.isArray(globalDoc.deletedPartyIds)) {
+          for (const delId of globalDoc.deletedPartyIds) {
+            if (!store.deletedPartyIds.includes(delId)) {
+              store.deletedPartyIds.push(delId);
+            }
+            delete store.parties[delId];
+          }
+        }
+
+        if (Array.isArray(globalDoc.leftPartyKeys)) {
+          for (const lk of globalDoc.leftPartyKeys) {
+            if (!store.leftPartyKeys.includes(lk)) {
+              store.leftPartyKeys.push(lk);
+            }
+          }
+        }
+
+        if (globalDoc.parties) {
+          for (const [remotePid, remoteParty] of Object.entries(globalDoc.parties)) {
+            if (!remoteParty || store.deletedPartyIds.includes(remotePid)) continue;
+            remoteParty.inviteCode = formatSixCharInviteCode(remoteParty.inviteCode);
+
+            const sameCodeLocalParty = Object.values(store.parties).find(
+              (lp) =>
+                lp &&
+                !store.deletedPartyIds.includes(lp.id) &&
+                doesInviteCodeMatch(lp.inviteCode, remoteParty.inviteCode)
+            );
+
+            if (sameCodeLocalParty && sameCodeLocalParty.id !== remotePid) {
+              const merged = mergePartyStates(
+                sameCodeLocalParty,
+                remoteParty,
+                store.leftPartyKeys
+              );
+              const canonicalId = sameCodeLocalParty.id.startsWith('party_code_')
+                ? remotePid
+                : sameCodeLocalParty.id;
+              merged.id = canonicalId;
+              store.parties[canonicalId] = merged;
+              if (canonicalId !== sameCodeLocalParty.id) {
+                delete store.parties[sameCodeLocalParty.id];
+              }
+            } else if (store.parties[remotePid]) {
+              store.parties[remotePid] = mergePartyStates(
+                store.parties[remotePid],
+                remoteParty,
+                store.leftPartyKeys
+              );
+            } else {
+              store.parties[remotePid] = remoteParty;
+            }
+          }
+        }
+
+        if (Array.isArray(globalDoc.invitations)) {
+          const invMap = new Map<string, HouseholdInvitation>();
+          for (const inv of [...globalDoc.invitations, ...(store.invitations || [])]) {
+            if (!inv || !inv.id || store.deletedPartyIds.includes(inv.partyId)) continue;
+            const prev = invMap.get(inv.id);
+            if (!prev || inv.status !== 'PENDING') {
+              invMap.set(inv.id, {
+                ...inv,
+                inviteCode: formatSixCharInviteCode(inv.inviteCode),
+              });
+            }
+          }
+          store.invitations = Array.from(invMap.values());
+        }
+      }
+
+      if (activePid && bundleDoc?.party && !store.deletedPartyIds.includes(activePid)) {
         store.parties[activePid] = store.parties[activePid]
-          ? mergePartyStates(store.parties[activePid], bundleDoc.party)
+          ? mergePartyStates(store.parties[activePid], bundleDoc.party, store.leftPartyKeys)
           : bundleDoc.party;
-        if (Array.isArray(bundleDoc.drops) && bundleDoc.drops.length > (store.dropsByParty[activePid]?.length || 0)) {
+        if (
+          Array.isArray(bundleDoc.drops) &&
+          bundleDoc.drops.length > (store.dropsByParty[activePid]?.length || 0)
+        ) {
           store.dropsByParty[activePid] = bundleDoc.drops;
         }
-        if (Array.isArray(bundleDoc.history) && bundleDoc.history.length > (store.historyByParty[activePid]?.length || 0)) {
+        if (
+          Array.isArray(bundleDoc.history) &&
+          bundleDoc.history.length > (store.historyByParty[activePid]?.length || 0)
+        ) {
           store.historyByParty[activePid] = bundleDoc.history;
         }
-        if (Array.isArray(bundleDoc.alerts) && bundleDoc.alerts.length > (store.alertsByParty[activePid]?.length || 0)) {
+        if (
+          Array.isArray(bundleDoc.alerts) &&
+          bundleDoc.alerts.length > (store.alertsByParty[activePid]?.length || 0)
+        ) {
           store.alertsByParty[activePid] = bundleDoc.alerts;
         }
       }
+    } catch {
+      // ignore offline errors
     }
+  };
 
-    // Push any local parties/codes to Cloud Firestore so other devices can find them by 6-char code
-    if (Object.keys(store.parties).length > 0 || store.invitations.length > 0) {
-      await pushPartyStoreToCloud(store, activePid);
-    }
-  } catch {
-    // ignore offline errors
-  }
+  await Promise.race([
+    runSync(),
+    new Promise<void>((resolve) => setTimeout(resolve, 2200)),
+  ]);
 }

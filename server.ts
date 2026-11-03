@@ -83,6 +83,7 @@ interface PersistentStore {
   invitations: HouseholdInvitation[];
   deletedPartyIds: string[];
   leftPartyKeys: string[];
+  clearedPartyUsers?: string[];
   officialEmailConfig: OfficialEmailConfig;
   vapidKeys?: {
     publicKey: string;
@@ -137,7 +138,12 @@ function loadStore(): PersistentStore {
       const existingCfg = parsed.officialEmailConfig;
       const loadedParties = parsed.parties || {};
       // Ensure all existing party invite codes are formatted as 6-char XXX-XXX codes matching the 6 UI boxes
+      const deletedIds = parsed.deletedPartyIds || [];
       for (const pid of Object.keys(loadedParties)) {
+        if (deletedIds.includes(pid)) {
+          delete loadedParties[pid];
+          continue;
+        }
         if (loadedParties[pid]) {
           loadedParties[pid].inviteCode = formatSixCharInviteCode(
             loadedParties[pid].inviteCode
@@ -155,8 +161,9 @@ function loadStore(): PersistentStore {
           ...inv,
           inviteCode: formatSixCharInviteCode(inv.inviteCode),
         })),
-        deletedPartyIds: parsed.deletedPartyIds || [],
+        deletedPartyIds: deletedIds,
         leftPartyKeys: parsed.leftPartyKeys || [],
+        clearedPartyUsers: parsed.clearedPartyUsers || [],
         officialEmailConfig: existingCfg
           ? {
               email: DEFAULT_OFFICIAL_EMAIL,
@@ -187,6 +194,7 @@ function loadStore(): PersistentStore {
     invitations: [],
     deletedPartyIds: [],
     leftPartyKeys: [],
+    clearedPartyUsers: [],
     officialEmailConfig: {
       email: DEFAULT_OFFICIAL_EMAIL,
       password: DEFAULT_OFFICIAL_PASS,
@@ -232,6 +240,51 @@ function saveStore() {
   }
 }
 
+function isLeftKeyMatchedServer(partyId: string, email?: string | null): boolean {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !partyId) return false;
+  return (
+    store.leftPartyKeys.includes(`${partyId}:${cleanEmail}`) ||
+    store.leftPartyKeys.includes(`${cleanEmail}:${partyId}`)
+  );
+}
+
+function addLeftKeyServer(partyId: string, email?: string | null): void {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !partyId) return;
+  const k1 = `${partyId}:${cleanEmail}`;
+  const k2 = `${cleanEmail}:${partyId}`;
+  if (!store.leftPartyKeys.includes(k1)) store.leftPartyKeys.push(k1);
+  if (!store.leftPartyKeys.includes(k2)) store.leftPartyKeys.push(k2);
+}
+
+function removeLeftKeyServer(partyId: string, email?: string | null): void {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !partyId) return;
+  const k1 = `${partyId}:${cleanEmail}`;
+  const k2 = `${cleanEmail}:${partyId}`;
+  store.leftPartyKeys = store.leftPartyKeys.filter((k) => k !== k1 && k !== k2);
+}
+
+async function fetchCloudRestWithTimeout(
+  url: string,
+  init?: RequestInit,
+  timeoutMs = 1800
+): Promise<Response | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function writeCloudFirestoreRestDoc(
   docId: string,
   kind: 'GLOBAL_INDEX' | 'PARTY_BUNDLE' | 'INVITE_CODE' | 'INVITATIONS' | 'PUSH_SUBS',
@@ -241,7 +294,7 @@ async function writeCloudFirestoreRestDoc(
   const payloadJson = JSON.stringify(payload);
   if (payloadJson.length > 940000) return;
   try {
-    await fetch(`${FIRESTORE_REST_BASE}/${safeId}`, {
+    await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -261,8 +314,8 @@ async function writeCloudFirestoreRestDoc(
 async function readCloudFirestoreRestDoc<T = any>(docId: string): Promise<T | null> {
   const safeId = docId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
   try {
-    const res = await fetch(`${FIRESTORE_REST_BASE}/${safeId}`);
-    if (!res.ok) return null;
+    const res = await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`);
+    if (!res || !res.ok) return null;
     const data = (await res.json()) as any;
     const raw = data?.fields?.payloadJson?.stringValue;
     if (typeof raw === 'string' && raw.length > 0) {
@@ -272,6 +325,17 @@ async function readCloudFirestoreRestDoc<T = any>(docId: string): Promise<T | nu
     // ignore
   }
   return null;
+}
+
+async function deleteCloudFirestoreRestDoc(docId: string): Promise<void> {
+  const safeId = docId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+  try {
+    await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
+      method: 'DELETE',
+    });
+  } catch {
+    // ignore
+  }
 }
 
 async function syncPartyToCloudFirestoreRest(partyId: string): Promise<void> {
@@ -501,14 +565,15 @@ function getPartyInvitations(partyId: string): HouseholdInvitation[] {
  */
 function resolveUserPartyAndSyncMember(
   acc: StoredUserAccount,
-  preferredPartyId?: string | null
+  preferredPartyId?: string | null,
+  noAutoMatch?: boolean
 ): string | null {
   const cleanEmail = acc.email.trim().toLowerCase();
+  if (!Array.isArray(store.clearedPartyUsers)) store.clearedPartyUsers = [];
 
-  // Check if a party is valid and the user hasn't left or deleted it
   const isMemberOfParty = (p: PartyState | undefined): p is PartyState => {
     if (!p || store.deletedPartyIds.includes(p.id)) return false;
-    if (store.leftPartyKeys.includes(`${p.id}:${cleanEmail}`)) return false;
+    if (isLeftKeyMatchedServer(p.id, cleanEmail)) return false;
     return (
       p.hostId === acc.uid ||
       p.hostEmail.toLowerCase() === cleanEmail ||
@@ -523,7 +588,7 @@ function resolveUserPartyAndSyncMember(
     matchedParty = store.parties[acc.partyId];
   } else if (preferredPartyId && isMemberOfParty(store.parties[preferredPartyId])) {
     matchedParty = store.parties[preferredPartyId];
-  } else {
+  } else if (!noAutoMatch && !store.clearedPartyUsers.includes(cleanEmail)) {
     // Search all active parties for this user's email or uid (most recently updated first)
     const candidates = Object.values(store.parties)
       .filter((p) => isMemberOfParty(p))
@@ -594,16 +659,48 @@ function hydrateClientCachedBundleIfNeeded(
   cachedBundle: any,
   userEmail?: string,
   cachedParties?: PartyState[],
-  cachedInvitations?: HouseholdInvitation[]
+  cachedInvitations?: HouseholdInvitation[],
+  clientDeletedPartyIds?: string[],
+  clientLeftPartyKeys?: string[]
 ) {
   let dirty = false;
   const cleanEmail = (userEmail || '').trim().toLowerCase();
+  if (!Array.isArray(store.clearedPartyUsers)) store.clearedPartyUsers = [];
+
+  if (Array.isArray(clientDeletedPartyIds)) {
+    for (const delId of clientDeletedPartyIds) {
+      if (typeof delId === 'string' && delId) {
+        if (!store.deletedPartyIds.includes(delId)) {
+          store.deletedPartyIds.push(delId);
+          dirty = true;
+        }
+        if (store.parties[delId]) {
+          delete store.parties[delId];
+          delete store.dropsByParty[delId];
+          delete store.historyByParty[delId];
+          delete store.emailsByParty[delId];
+          delete store.alertsByParty[delId];
+          dirty = true;
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(clientLeftPartyKeys)) {
+    for (const lk of clientLeftPartyKeys) {
+      if (typeof lk === 'string' && lk && !store.leftPartyKeys.includes(lk)) {
+        store.leftPartyKeys.push(lk);
+        dirty = true;
+      }
+    }
+  }
 
   const ingestParty = (incomingParty: PartyState) => {
     if (!incomingParty || !incomingParty.id) return;
     const pid = incomingParty.id;
     if (store.deletedPartyIds.includes(pid)) return;
-    if (cleanEmail && store.leftPartyKeys.includes(`${pid}:${cleanEmail}`)) return;
+    if (cleanEmail && isLeftKeyMatchedServer(pid, cleanEmail)) return;
+    if (cleanEmail && store.clearedPartyUsers!.includes(cleanEmail)) return;
 
     incomingParty.inviteCode = formatSixCharInviteCode(incomingParty.inviteCode);
     const existingParty = store.parties[pid];
@@ -611,12 +708,11 @@ function hydrateClientCachedBundleIfNeeded(
       store.parties[pid] = incomingParty;
       dirty = true;
     } else {
-      // If incoming party has members not yet in existingParty, merge them
       for (const m of incomingParty.members || []) {
         const mMail = (m.email || '').trim().toLowerCase();
         if (
           mMail &&
-          !store.leftPartyKeys.includes(`${pid}:${mMail}`) &&
+          !isLeftKeyMatchedServer(pid, mMail) &&
           !existingParty.members.some(
             (em) => em.uid === m.uid || em.email.toLowerCase() === mMail
           )
@@ -632,7 +728,12 @@ function hydrateClientCachedBundleIfNeeded(
 
     for (const member of incomingParty.members || []) {
       const mEmail = (member.email || '').trim().toLowerCase();
-      if (mEmail && !store.accounts[mEmail]) {
+      if (
+        mEmail &&
+        !store.accounts[mEmail] &&
+        !store.clearedPartyUsers!.includes(mEmail) &&
+        !isLeftKeyMatchedServer(pid, mEmail)
+      ) {
         store.accounts[mEmail] = {
           uid: member.uid,
           email: mEmail,
@@ -652,7 +753,7 @@ function hydrateClientCachedBundleIfNeeded(
   if (cachedBundle && cachedBundle.party && cachedBundle.party.id) {
     const pid = cachedBundle.party.id;
     ingestParty(cachedBundle.party as PartyState);
-    if (!store.deletedPartyIds.includes(pid)) {
+    if (!store.deletedPartyIds.includes(pid) && store.parties[pid]) {
       if (Array.isArray(cachedBundle.drops) && !store.dropsByParty[pid]) {
         store.dropsByParty[pid] = cachedBundle.drops;
         dirty = true;
@@ -1410,12 +1511,15 @@ async function startServer() {
   const handleSessionLookup = async (params: {
     email: string;
     partyId: string;
+    noAutoMatch?: boolean;
     displayName?: string;
     uid?: string;
     photoURL?: string;
     cachedBundle?: any;
     cachedParties?: PartyState[];
     cachedInvitations?: HouseholdInvitation[];
+    deletedPartyIds?: string[];
+    leftPartyKeys?: string[];
   }) => {
     const cleanEmail = params.email.trim().toLowerCase();
     const partyId = params.partyId.trim();
@@ -1424,7 +1528,9 @@ async function startServer() {
       params.cachedBundle,
       cleanEmail,
       params.cachedParties,
-      params.cachedInvitations
+      params.cachedInvitations,
+      params.deletedPartyIds,
+      params.leftPartyKeys
     );
 
     if (cleanEmail) {
@@ -1445,7 +1551,11 @@ async function startServer() {
         store.accounts[cleanEmail] = acc;
         saveStore();
       }
-      const resolvedPartyId = resolveUserPartyAndSyncMember(acc, partyId);
+      const resolvedPartyId = resolveUserPartyAndSyncMember(
+        acc,
+        partyId,
+        params.noAutoMatch
+      );
       const bundle = resolvedPartyId ? await buildPartyBundle(resolvedPartyId) : null;
       return {
         user: {
@@ -1484,22 +1594,28 @@ async function startServer() {
     const {
       email,
       partyId,
+      noAutoMatch,
       displayName,
       uid,
       photoURL,
       cachedBundle,
       cachedParties,
       cachedInvitations,
+      deletedPartyIds,
+      leftPartyKeys,
     } = req.body || {};
     const result = await handleSessionLookup({
       email: String(email || ''),
       partyId: String(partyId || ''),
+      noAutoMatch: Boolean(noAutoMatch),
       displayName: displayName ? String(displayName) : undefined,
       uid: uid ? String(uid) : undefined,
       photoURL: photoURL ? String(photoURL) : undefined,
       cachedBundle,
       cachedParties,
       cachedInvitations,
+      deletedPartyIds,
+      leftPartyKeys,
     });
     return res.json(result);
   });
@@ -1628,6 +1744,11 @@ async function startServer() {
       },
     ];
 
+    if (Array.isArray(store.clearedPartyUsers)) {
+      store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+    }
+    removeLeftKeyServer(partyId, cleanEmail);
+
     saveStore();
     syncPartyToCloudFirestoreRest(partyId).catch(() => {});
     return res.json({
@@ -1738,10 +1859,11 @@ async function startServer() {
       });
     }
 
-    // Clear any previous "left" marker if the roommate is re-joining via invite code
-    store.leftPartyKeys = store.leftPartyKeys.filter(
-      (k) => k !== `${matchingParty.id}:${cleanEmail}`
-    );
+    // Clear any previous "left" or "cleared" marker if the roommate is joining via invite code
+    if (Array.isArray(store.clearedPartyUsers)) {
+      store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+    }
+    removeLeftKeyServer(matchingParty.id, cleanEmail);
 
     // Mark any pending email invitation for this party & user as ACCEPTED
     store.invitations = store.invitations.map((inv) =>
@@ -1931,9 +2053,10 @@ async function startServer() {
         : item
     );
 
-    store.leftPartyKeys = store.leftPartyKeys.filter(
-      (k) => k !== `${targetParty.id}:${cleanEmail}`
-    );
+    if (Array.isArray(store.clearedPartyUsers)) {
+      store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+    }
+    removeLeftKeyServer(targetParty.id, cleanEmail);
 
     const nowIso = new Date().toISOString();
     let acc = store.accounts[cleanEmail];
@@ -2037,6 +2160,25 @@ async function startServer() {
     const callerUid = String(userUid || userId || '');
     const cleanEmail = String(userEmail || '').trim().toLowerCase();
     const party = store.parties[partyId];
+
+    if (!Array.isArray(store.clearedPartyUsers)) store.clearedPartyUsers = [];
+    if (cleanEmail && !store.clearedPartyUsers.includes(cleanEmail)) {
+      store.clearedPartyUsers.push(cleanEmail);
+    }
+
+    // Mark all parties where this user is listed as left so no older party can resurrect
+    for (const p of Object.values(store.parties)) {
+      if (!p) continue;
+      if (
+        p.id === partyId ||
+        p.hostId === callerUid ||
+        p.hostEmail.toLowerCase() === cleanEmail ||
+        p.members.some((m) => m.uid === callerUid || m.email.toLowerCase() === cleanEmail)
+      ) {
+        addLeftKeyServer(p.id, cleanEmail);
+      }
+    }
+
     if (!party) {
       if (cleanEmail && store.accounts[cleanEmail]) {
         store.accounts[cleanEmail].partyId = undefined;
@@ -2045,16 +2187,18 @@ async function startServer() {
       return res.json({
         ok: true,
         dissolved: true,
-        user: cleanEmail && store.accounts[cleanEmail]
-          ? {
-              uid: store.accounts[cleanEmail].uid,
-              email: store.accounts[cleanEmail].email,
-              displayName: store.accounts[cleanEmail].displayName,
-              photoURL: store.accounts[cleanEmail].photoURL,
-              avatarColor: store.accounts[cleanEmail].avatarColor,
-              partyId: null,
-            }
-          : null,
+        leftPartyId: partyId,
+        user:
+          cleanEmail && store.accounts[cleanEmail]
+            ? {
+                uid: store.accounts[cleanEmail].uid,
+                email: store.accounts[cleanEmail].email,
+                displayName: store.accounts[cleanEmail].displayName,
+                photoURL: store.accounts[cleanEmail].photoURL,
+                avatarColor: store.accounts[cleanEmail].avatarColor,
+                partyId: null,
+              }
+            : null,
         bundle: null,
       });
     }
@@ -2062,25 +2206,19 @@ async function startServer() {
     const nowIso = new Date().toISOString();
     const leaveResult = leavePartyMember(party, callerUid, cleanEmail, nowIso);
 
-    if (cleanEmail) {
-      const leftKey = `${partyId}:${cleanEmail}`;
-      if (!store.leftPartyKeys.includes(leftKey)) {
-        store.leftPartyKeys.push(leftKey);
-      }
-      if (store.accounts[cleanEmail]) {
-        store.accounts[cleanEmail].partyId = undefined;
-        store.accounts[cleanEmail].updatedAt = nowIso;
-      }
+    if (cleanEmail && store.accounts[cleanEmail]) {
+      store.accounts[cleanEmail].partyId = undefined;
+      store.accounts[cleanEmail].updatedAt = nowIso;
     }
     for (const acc of Object.values(store.accounts)) {
-      if (acc.uid === callerUid && acc.partyId === partyId) {
+      if (acc.uid === callerUid || acc.email.toLowerCase() === cleanEmail) {
         acc.partyId = undefined;
         acc.updatedAt = nowIso;
       }
     }
 
     if (!leaveResult.updatedParty) {
-      // Last member left -> dissolve party completely
+      const inviteCodeToDelete = party.inviteCode.replace(/[^A-Z0-9]/g, '').slice(0, 6);
       if (!store.deletedPartyIds.includes(partyId)) {
         store.deletedPartyIds.push(partyId);
       }
@@ -2089,6 +2227,10 @@ async function startServer() {
       delete store.historyByParty[partyId];
       delete store.emailsByParty[partyId];
       delete store.alertsByParty[partyId];
+      deleteCloudFirestoreRestDoc(`party_${partyId}`).catch(() => {});
+      if (inviteCodeToDelete.length >= 4) {
+        deleteCloudFirestoreRestDoc(`code_${inviteCodeToDelete}`).catch(() => {});
+      }
     } else {
       store.parties[partyId] = leaveResult.updatedParty;
       if (!store.alertsByParty[partyId]) store.alertsByParty[partyId] = [];
@@ -2115,6 +2257,7 @@ async function startServer() {
         read: false,
         createdAt: nowIso,
       });
+      syncPartyToCloudFirestoreRest(partyId).catch(() => {});
     }
 
     saveStore();
@@ -2122,6 +2265,8 @@ async function startServer() {
     return res.json({
       ok: true,
       dissolved: !leaveResult.updatedParty,
+      leftPartyId: partyId,
+      deletedPartyId: !leaveResult.updatedParty ? partyId : undefined,
       hostTransferred: leaveResult.hostTransferred,
       promotedHostName: leaveResult.promotedHost?.displayName,
       user: acc
@@ -2138,81 +2283,114 @@ async function startServer() {
     });
   });
 
-  // Delete Household Party (Host Only — permanently dissolves the party for all members)
+  // Delete Household Party (Host Only — permanently dissolves the party for all members and purges older host parties)
   app.post('/api/party/delete', async (req, res) => {
     const { partyId, userUid, userId, userEmail } = req.body || {};
     const callerUid = String(userUid || userId || '');
     const cleanEmail = String(userEmail || '').trim().toLowerCase();
     const party = store.parties[partyId];
 
-    if (!party) {
-      if (cleanEmail && store.accounts[cleanEmail]) {
-        store.accounts[cleanEmail].partyId = undefined;
-        saveStore();
+    if (party) {
+      const isHostCaller =
+        party.hostId === callerUid ||
+        party.hostEmail.toLowerCase() === cleanEmail ||
+        party.members.some(
+          (m) =>
+            (m.uid === callerUid || m.email.toLowerCase() === cleanEmail) &&
+            m.role === 'HOST'
+        ) ||
+        cleanEmail === OFFICIAL_BINDROP_EMAIL;
+
+      if (!isHostCaller) {
+        return res.status(403).json({
+          error:
+            'Only the Household Party Host can delete the party for everyone. Use "Leave Party" to exit on your own.',
+        });
       }
-      return res.json({
-        ok: true,
-        deletedPartyId: partyId,
-        user: cleanEmail && store.accounts[cleanEmail]
-          ? {
-              uid: store.accounts[cleanEmail].uid,
-              email: store.accounts[cleanEmail].email,
-              displayName: store.accounts[cleanEmail].displayName,
-              photoURL: store.accounts[cleanEmail].photoURL,
-              avatarColor: store.accounts[cleanEmail].avatarColor,
-              partyId: null,
-            }
-          : null,
-        bundle: null,
-      });
-    }
-
-    const isHostCaller =
-      party.hostId === callerUid ||
-      party.hostEmail.toLowerCase() === cleanEmail ||
-      party.members.some(
-        (m) =>
-          (m.uid === callerUid || m.email.toLowerCase() === cleanEmail) &&
-          m.role === 'HOST'
-      ) ||
-      cleanEmail === OFFICIAL_BINDROP_EMAIL;
-
-    if (!isHostCaller) {
-      return res.status(403).json({
-        error: 'Only the Household Party Host can delete the party for everyone. Use "Leave Party" to exit on your own.',
-      });
     }
 
     const nowIso = new Date().toISOString();
-    if (!store.deletedPartyIds.includes(partyId)) {
-      store.deletedPartyIds.push(partyId);
+    if (!Array.isArray(store.clearedPartyUsers)) store.clearedPartyUsers = [];
+    if (cleanEmail && !store.clearedPartyUsers.includes(cleanEmail)) {
+      store.clearedPartyUsers.push(cleanEmail);
     }
 
-    // Clear partyId for every account that was in this party
-    for (const acc of Object.values(store.accounts)) {
-      if (
-        acc.partyId === partyId ||
-        party.members.some(
-          (m) => m.uid === acc.uid || m.email.toLowerCase() === acc.email.toLowerCase()
-        )
-      ) {
-        acc.partyId = undefined;
-        acc.updatedAt = nowIso;
+    const deletedIds: string[] = [];
+    const deletedCodes: string[] = [];
+    if (partyId) {
+      deletedIds.push(partyId);
+      if (party?.inviteCode) deletedCodes.push(party.inviteCode);
+    }
+
+    // Also scan all parties in store.parties and purge any older parties where this user was Host or Member
+    // so that resolveUserPartyAndSyncMember can NEVER fall back to an older historical party!
+    for (const p of Object.values(store.parties)) {
+      if (!p) continue;
+      const isUserHost =
+        p.hostId === callerUid ||
+        p.hostEmail.toLowerCase() === cleanEmail ||
+        p.members.some(
+          (m) =>
+            (m.uid === callerUid || m.email.toLowerCase() === cleanEmail) &&
+            m.role === 'HOST'
+        );
+      const isUserMember = p.members.some(
+        (m) => m.uid === callerUid || m.email.toLowerCase() === cleanEmail
+      );
+
+      if (isUserHost || p.id === partyId) {
+        if (!deletedIds.includes(p.id)) deletedIds.push(p.id);
+        if (p.inviteCode) deletedCodes.push(p.inviteCode);
+        addLeftKeyServer(p.id, cleanEmail);
+      } else if (isUserMember) {
+        addLeftKeyServer(p.id, cleanEmail);
       }
     }
 
-    delete store.parties[partyId];
-    delete store.dropsByParty[partyId];
-    delete store.historyByParty[partyId];
-    delete store.emailsByParty[partyId];
-    delete store.alertsByParty[partyId];
-    store.invitations = store.invitations.filter((inv) => inv.partyId !== partyId);
+    for (const delId of deletedIds) {
+      if (!store.deletedPartyIds.includes(delId)) {
+        store.deletedPartyIds.push(delId);
+      }
+      const targetP = store.parties[delId];
+      for (const acc of Object.values(store.accounts)) {
+        if (
+          acc.partyId === delId ||
+          acc.uid === callerUid ||
+          acc.email.toLowerCase() === cleanEmail ||
+          targetP?.members.some(
+            (m) => m.uid === acc.uid || m.email.toLowerCase() === acc.email.toLowerCase()
+          )
+        ) {
+          acc.partyId = undefined;
+          acc.updatedAt = nowIso;
+        }
+      }
+      delete store.parties[delId];
+      delete store.dropsByParty[delId];
+      delete store.historyByParty[delId];
+      delete store.emailsByParty[delId];
+      delete store.alertsByParty[delId];
+
+      deleteCloudFirestoreRestDoc(`party_${delId}`).catch(() => {});
+    }
+
+    for (const code of deletedCodes) {
+      const cleanCode = code.replace(/[^A-Z0-9]/g, '').slice(0, 6);
+      if (cleanCode.length >= 4) {
+        deleteCloudFirestoreRestDoc(`code_${cleanCode}`).catch(() => {});
+      }
+    }
+
+    store.invitations = store.invitations.filter(
+      (inv) => !deletedIds.includes(inv.partyId)
+    );
 
     saveStore();
     const acc = cleanEmail ? store.accounts[cleanEmail] : undefined;
     return res.json({
       ok: true,
       deletedPartyId: partyId,
+      deletedPartyIds: deletedIds,
       user: acc
         ? {
             uid: acc.uid,

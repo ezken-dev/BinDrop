@@ -219,6 +219,7 @@ export default function App() {
     return 'default';
   });
   const seenPopupIdsRef = useRef<Set<string>>(loadSeenPopupIds());
+  const sessionMutationEpochRef = useRef<number>(0);
 
   // HUD Pop-Up Notification Modal state
   const [hudEmailConfirmOpen, setHudEmailConfirmOpen] = useState(false);
@@ -365,7 +366,7 @@ export default function App() {
     return () => navigator.serviceWorker.removeEventListener('message', handleSwMessage);
   }, [party?.id, party?.name, currentAccount?.uid, currentAccount?.displayName, currentAccount?.email]);
 
-  // Sync with Firebase Firestore when Firebase Auth user is active
+  // Sync with Firebase Firestore when Firebase Auth user is active (non-blocking)
   const syncPartyToFirestore = useCallback(
     async (
       updatedParty: PartyState,
@@ -375,7 +376,7 @@ export default function App() {
       if (!auth.currentUser) return;
       const uid = auth.currentUser.uid;
       try {
-        await setDoc(
+        setDoc(
           doc(db, 'parties', updatedParty.id),
           {
             id: updatedParty.id,
@@ -400,10 +401,10 @@ export default function App() {
             updatedAt: serverTimestamp(),
           },
           { merge: true }
-        );
+        ).catch(() => {});
 
         if (newDrop && newDrop.userId === uid) {
-          await setDoc(doc(db, 'parties', updatedParty.id, 'drops', newDrop.id), {
+          setDoc(doc(db, 'parties', updatedParty.id, 'drops', newDrop.id), {
             id: newDrop.id,
             partyId: updatedParty.id,
             userId: uid,
@@ -417,11 +418,11 @@ export default function App() {
             deadlineIso: newDrop.deadlineIso,
             submittedIso: newDrop.submittedIso,
             createdAt: serverTimestamp(),
-          });
+          }).catch(() => {});
         }
 
         if (newHistory) {
-          await setDoc(doc(db, 'parties', updatedParty.id, 'history', newHistory.id), {
+          setDoc(doc(db, 'parties', updatedParty.id, 'history', newHistory.id), {
             id: newHistory.id,
             partyId: updatedParty.id,
             userId: newHistory.userId,
@@ -432,7 +433,7 @@ export default function App() {
             recordedIso: newHistory.recordedIso,
             notes: newHistory.notes,
             createdAt: serverTimestamp(),
-          });
+          }).catch(() => {});
         }
       } catch {
         // Non-blocking if user is signed in via email/password session without Google token
@@ -444,18 +445,24 @@ export default function App() {
   // Fetch initial session & poll every 5 seconds for 5-hour warnings, missed deadlines, and roommate photo uploads
   const refreshSessionState = useCallback(async () => {
     if (!currentAccount?.email) return;
+    const requestEpoch = sessionMutationEpochRef.current;
     try {
       const { ok, data } = await apiFetch('/api/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: currentAccount.email,
-          partyId: currentAccount.partyId || party?.id || null,
+          partyId:
+            currentAccount.partyId !== undefined
+              ? currentAccount.partyId
+              : party?.id || null,
           displayName: currentAccount.displayName,
           uid: currentAccount.uid,
           photoURL: currentAccount.photoURL,
         }),
       });
+      // Discard stale poll responses if the user created, joined, left, or deleted a party while the request was in flight
+      if (requestEpoch !== sessionMutationEpochRef.current) return;
       if (!ok || !data) return;
       if (data.user) {
         setCurrentAccount((prev) => {
@@ -475,7 +482,7 @@ export default function App() {
       }
       if (data.bundle) {
         applyServerBundle(data.bundle);
-      } else if (data.user && !data.user.partyId && !party) {
+      } else if (data.user && !data.user.partyId) {
         applyServerBundle(null, { forceClearIfNull: true });
       }
     } catch {
@@ -487,7 +494,7 @@ export default function App() {
     currentAccount?.displayName,
     currentAccount?.uid,
     currentAccount?.photoURL,
-    party,
+    party?.id,
     applyServerBundle,
     syncIncomingInvitations,
   ]);
@@ -543,7 +550,7 @@ export default function App() {
             }
           }
 
-          await setDoc(
+          setDoc(
             doc(db, 'users', user.uid),
             {
               uid: user.uid,
@@ -558,9 +565,9 @@ export default function App() {
               updatedAt: serverTimestamp(),
             },
             { merge: true }
-          );
+          ).catch(() => {});
 
-          await setDoc(
+          setDoc(
             doc(db, 'users', user.uid, 'private', 'info'),
             {
               email: user.email,
@@ -568,7 +575,7 @@ export default function App() {
               updatedAt: serverTimestamp(),
             },
             { merge: true }
-          );
+          ).catch(() => {});
         } catch {
           // ignore
         }
@@ -628,6 +635,7 @@ export default function App() {
     displayName: string;
     photoURL?: string;
   }) => {
+    sessionMutationEpochRef.current += 1;
     const { ok, data } = await apiFetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -636,12 +644,14 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Could not create account.');
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount(data.user);
     if (data.invitations) syncIncomingInvitations(data.invitations);
     applyServerBundle(data.bundle, { forceClearIfNull: true });
   };
 
   const handleLoginWithEmail = async (payload: { email: string; password: string }) => {
+    sessionMutationEpochRef.current += 1;
     const { ok, data } = await apiFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -650,6 +660,7 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Invalid login credentials.');
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount(data.user);
     if (data.invitations) syncIncomingInvitations(data.invitations);
     applyServerBundle(data.bundle, { forceClearIfNull: true });
@@ -661,6 +672,7 @@ export default function App() {
     photoURL?: string;
   }) => {
     setAuthError(null);
+    sessionMutationEpochRef.current += 1;
     const { ok, data } = await apiFetch('/api/auth/google-sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -674,6 +686,7 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Could not sign in with Google account.');
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount(data.user);
     if (data.invitations) syncIncomingInvitations(data.invitations);
     applyServerBundle(data.bundle, { forceClearIfNull: true });
@@ -685,6 +698,7 @@ export default function App() {
     errorMessage?: string;
   }> => {
     setAuthError(null);
+    sessionMutationEpochRef.current += 1;
     try {
       const result = await googleSignIn();
       if (!result || !result.user) {
@@ -706,6 +720,7 @@ export default function App() {
           }),
         });
         if (ok && data?.user) {
+          sessionMutationEpochRef.current += 1;
           setCurrentAccount(data.user);
           applyServerBundle(data.bundle, { forceClearIfNull: true });
           return { ok: true };
@@ -727,11 +742,13 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    sessionMutationEpochRef.current += 1;
     try {
       await signOutUser();
     } catch {
       // ignore
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount(null);
     applyServerBundle(null, { forceClearIfNull: true });
     setActiveTab('hud');
@@ -744,6 +761,7 @@ export default function App() {
     initialDeadlineHours?: number;
   }) => {
     if (!currentAccount) return;
+    sessionMutationEpochRef.current += 1;
     const { ok, data } = await apiFetch('/api/party/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -760,15 +778,17 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Failed to create household party.');
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
     if (data.bundle?.party) {
-      await syncPartyToFirestore(data.bundle.party);
+      syncPartyToFirestore(data.bundle.party).catch(() => {});
     }
   };
 
   const handleJoinHouseholdByCode = async (inviteCode: string) => {
     if (!currentAccount) return;
+    sessionMutationEpochRef.current += 1;
     const { ok, data } = await apiFetch('/api/party/join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -783,17 +803,20 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Could not join household party.');
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
   };
 
   const handleLeaveParty = async () => {
     if (!party || !currentAccount) return;
+    sessionMutationEpochRef.current += 1;
+    const targetPartyId = party.id;
     const { ok, data } = await apiFetch('/api/party/leave', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        partyId: party.id,
+        partyId: targetPartyId,
         userId: currentAccount.uid,
         userEmail: currentAccount.email,
       }),
@@ -801,6 +824,7 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Could not leave household party.');
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount((prev) => (prev ? { ...prev, partyId: null } : prev));
     applyServerBundle(null, { forceClearIfNull: true });
     setActiveTab('hud');
@@ -808,11 +832,13 @@ export default function App() {
 
   const handleDeleteParty = async () => {
     if (!party || !currentAccount) return;
+    sessionMutationEpochRef.current += 1;
+    const targetPartyId = party.id;
     const { ok, data } = await apiFetch('/api/party/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        partyId: party.id,
+        partyId: targetPartyId,
         userId: currentAccount.uid,
         userEmail: currentAccount.email,
       }),
@@ -820,6 +846,7 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Could not delete household party.');
     }
+    sessionMutationEpochRef.current += 1;
     setCurrentAccount((prev) => (prev ? { ...prev, partyId: null } : prev));
     applyServerBundle(null, { forceClearIfNull: true });
     setActiveTab('hud');
@@ -837,6 +864,7 @@ export default function App() {
 
   const handleAcceptInvitation = async (invitation: HouseholdInvitation) => {
     if (!currentAccount) return;
+    sessionMutationEpochRef.current += 1;
     const { ok, data } = await apiFetch('/api/party/respond-invite', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -852,6 +880,7 @@ export default function App() {
     if (!ok) {
       throw new Error(data?.error || 'Could not accept household invitation.');
     }
+    sessionMutationEpochRef.current += 1;
     if (data.user) setCurrentAccount(data.user);
     if (data.invitations) setPendingInvitations(data.invitations);
     if (data.bundle) applyServerBundle(data.bundle);
@@ -897,7 +926,7 @@ export default function App() {
     }
     applyServerBundle(data.bundle);
     if (data.bundle?.party) {
-      await syncPartyToFirestore(data.bundle.party);
+      syncPartyToFirestore(data.bundle.party).catch(() => {});
     }
   };
 
@@ -944,11 +973,11 @@ export default function App() {
       }
       setTimeout(() => setCelebrationBanner(null), 5500);
 
-      await syncPartyToFirestore(
+      syncPartyToFirestore(
         updatedParty,
         data.drop,
         data.bundle.history?.[0]
-      );
+      ).catch(() => {});
     }
   };
 
@@ -989,7 +1018,12 @@ export default function App() {
           );
         }
         setTimeout(() => setCelebrationBanner(null), 5500);
-        await syncPartyToFirestore(updatedParty, data.drop, data.bundle.history?.[0]);
+
+        syncPartyToFirestore(
+          updatedParty,
+          data.drop,
+          data.bundle.history?.[0]
+        ).catch(() => {});
       }
     } finally {
       setIsVerifyingDropId(null);
@@ -1103,7 +1137,7 @@ export default function App() {
     });
     if (ok && data?.bundle) {
       applyServerBundle(data.bundle);
-      await syncPartyToFirestore(data.bundle.party);
+      syncPartyToFirestore(data.bundle.party).catch(() => {});
     }
   };
 
@@ -1124,7 +1158,7 @@ export default function App() {
         `Rotation schedule updated to every ${days} ${days === 1 ? 'Day' : 'Days'} (${rotationIntervalHours}h)!`
       );
       setTimeout(() => setCelebrationBanner(null), 4000);
-      await syncPartyToFirestore(data.bundle.party);
+      syncPartyToFirestore(data.bundle.party).catch(() => {});
     }
   };
 
@@ -1139,7 +1173,7 @@ export default function App() {
     });
     if (ok && data?.bundle) {
       applyServerBundle(data.bundle);
-      await syncPartyToFirestore(data.bundle.party);
+      syncPartyToFirestore(data.bundle.party).catch(() => {});
     }
   };
 

@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for fixing cross-device 6-character invite code lookup (e.g. MUT-HJZ) across all devices/deployments and building native system-level PWA background Web Push notifications (manifest.json, sw.js, VAPID keys, iOS Home Screen rule, Turn on Alerts toggle, and web-push backend dispatch) along with a complete architecture guide.",
-  "updatedAt": "2026-11-03T05:02:40.363990630Z",
+  "summary": "Implementation plan to fix infinite Sign-In (\"Please wait...\"), Create Party (\"Creating...\"), and Join Party (\"Joining...\") states, and permanently stop deleted or left parties from reappearing.",
+  "updatedAt": "2026-11-03T05:34:33.102817938Z",
   "requestFeedback": true,
   "userFacing": true
 }
