@@ -10,9 +10,13 @@ import {
   Mail,
   KeyRound,
   Calendar,
+  LogOut,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   formatRotationDaysLabel,
+  formatSixCharInviteCode,
   ROTATION_DAY_OPTIONS,
   validateInviteCode,
   type HouseholdMember,
@@ -23,6 +27,7 @@ import { MemberAvatar } from './MemberAvatar';
 interface PartyManagerViewProps {
   party: PartyState;
   currentUserId: string;
+  isHostOrAdmin?: boolean;
   onCreateParty: (newParty: {
     name: string;
     rotationIntervalHours: number;
@@ -33,15 +38,20 @@ interface PartyManagerViewProps {
     memberEmail: string;
   }) => Promise<void>;
   onUpdateRotationIntervalHours: (hours: number) => Promise<void>;
+  onLeaveParty?: () => Promise<void>;
+  onDeleteParty?: () => Promise<void>;
 }
 
 export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
   party,
   currentUserId,
+  isHostOrAdmin = false,
   onCreateParty,
   onJoinExistingPartyByCode,
   onAddRoommateWithEmail,
   onUpdateRotationIntervalHours,
+  onLeaveParty,
+  onDeleteParty,
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
 
@@ -64,8 +74,15 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
   const [createSuccess, setCreateSuccess] = useState<string | null>(null);
   const [rotationBanner, setRotationBanner] = useState<string | null>(null);
 
+  // Leave / Delete Party Confirmation States
+  const [confirmAction, setConfirmAction] = useState<'leave' | 'delete' | null>(null);
+  const [isActionPending, setIsActionPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const formattedInviteCode = formatSixCharInviteCode(party.inviteCode);
+
   const handleCopyInviteCode = () => {
-    navigator.clipboard?.writeText(party.inviteCode).catch(() => {});
+    navigator.clipboard?.writeText(formattedInviteCode).catch(() => {});
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
   };
@@ -93,7 +110,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
     }
     if (!cleanEmail || !cleanEmail.includes('@')) {
       setAddError(
-        'Enter a valid email address so they receive 5-hour warnings & missed trash emails.'
+        'Enter a valid email address so their account automatically syncs with this party.'
       );
       return;
     }
@@ -107,7 +124,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
       setRoommateName('');
       setRoommateEmail('');
       setAddSuccess(
-        `Added ${cleanName} (${cleanEmail}) to the party rotation! Email reminders enabled.`
+        `Added ${cleanName} (${cleanEmail}) to the party rotation! Pop-up notifications enabled.`
       );
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Could not add roommate.');
@@ -123,7 +140,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
 
     const normalizedCode = joinCodeInput.trim().toUpperCase();
     if (!validateInviteCode(normalizedCode)) {
-      setJoinError('Enter a valid invite code (4–16 uppercase characters).');
+      setJoinError('Enter a valid 6-character invite code (e.g. BIN-7X4).');
       return;
     }
 
@@ -159,11 +176,41 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
     }
   };
 
-  const sixCharSlots = party.inviteCode
+  const handleExecuteLeaveParty = async () => {
+    if (!onLeaveParty) return;
+    setActionError(null);
+    setIsActionPending(true);
+    try {
+      await onLeaveParty();
+      setConfirmAction(null);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not leave household party.');
+    } finally {
+      setIsActionPending(false);
+    }
+  };
+
+  const handleExecuteDeleteParty = async () => {
+    if (!onDeleteParty) return;
+    setActionError(null);
+    setIsActionPending(true);
+    try {
+      await onDeleteParty();
+      setConfirmAction(null);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not delete household party.');
+    } finally {
+      setIsActionPending(false);
+    }
+  };
+
+  const sixCharSlots = formattedInviteCode
     .replace(/[^A-Z0-9]/g, '')
     .padEnd(6, '0')
     .slice(0, 6)
     .split('');
+
+  const nextRoommateForHostTransfer = party.members.find((m) => m.uid !== currentUserId);
 
   return (
     <div className="animate-view-enter space-y-6">
@@ -233,26 +280,30 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
               data-testid="active-invite-code"
               className="text-sm font-mono og-bold text-[#d0ff45]"
             >
-              {party.inviteCode}
+              {formattedInviteCode}
             </p>
           </div>
 
-          {/* 6-Digit/Char Rounded Code Boxes */}
-          <div className="flex items-center justify-center gap-2 sm:gap-3 py-2">
+          {/* 6-Digit/Char Rounded Code Boxes (3 chars + hyphen + 3 chars) */}
+          <div className="flex items-center justify-center gap-1.5 sm:gap-2.5 py-2">
             {sixCharSlots.map((char, index) => (
-              <div
-                key={`${char}-${index}`}
-                className="animate-tile-pop w-11 h-13 sm:w-12 sm:h-14 rounded-2xl bg-[#091c0b] border border-white/10 flex items-center justify-center text-lg sm:text-xl og-bold font-mono text-white shadow-inner"
-              >
-                {char}
-              </div>
+              <React.Fragment key={`${char}-${index}`}>
+                {index === 3 && (
+                  <span className="text-zinc-500 font-mono og-bold text-lg select-none">
+                    -
+                  </span>
+                )}
+                <div className="animate-tile-pop w-11 h-13 sm:w-12 sm:h-14 rounded-2xl bg-[#091c0b] border border-[#d0ff45]/35 flex items-center justify-center text-lg sm:text-xl og-bold font-mono text-[#d0ff45] shadow-inner">
+                  {char}
+                </div>
+              </React.Fragment>
             ))}
           </div>
 
           <p className="text-xs og-light text-zinc-400">
-            Roommates can log into their own account and enter{' '}
-            <span className="text-[#d0ff45] font-mono og-bold">{party.inviteCode}</span> to
-            join this household party.
+            Roommates can log into their account on PC or phone and enter{' '}
+            <span className="text-[#d0ff45] font-mono og-bold">{formattedInviteCode}</span>{' '}
+            (6 characters) to join this household party immediately.
           </p>
 
           <button
@@ -268,7 +319,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
             ) : (
               <>
                 <Copy className="w-4 h-4" />
-                <span>Copy Invite Code ({party.inviteCode})</span>
+                <span>Copy 6-Character Code ({formattedInviteCode})</span>
               </>
             )}
           </button>
@@ -282,13 +333,13 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
           <div className="space-y-2 text-center sm:text-left">
             <div className="inline-flex items-center gap-2 text-xs og-medium text-[#d0ff45]">
               <UserPlus className="w-4 h-4" />
-              <span>Enroll Roommate Account &amp; Email</span>
+              <span>Enroll Roommate Account &amp; Auto-Link Party</span>
             </div>
             <h3 className="text-2xl og-bold text-white tracking-tight">
               Add Roommate to Rotation
             </h3>
             <p className="text-xs sm:text-sm og-light text-zinc-400 leading-relaxed">
-              Register a roommate with their real email address so BinDrop automatically mails them a 5-hour advance warning and missed-deadline reminder on their turn.
+              Add a roommate with their email address. When they sign in on PC or mobile with that email, BinDrop automatically places them into <strong className="text-white">{party.name}</strong> and enables instant pop-up notifications.
             </p>
           </div>
 
@@ -315,7 +366,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
                 htmlFor="join-member-email"
                 className="block text-xs og-medium text-white pl-1"
               >
-                Roommate Account Email (For 5h Warning &amp; Missed Turn Emails)
+                Roommate Account Email (For Cross-Device Sync &amp; Pop-Up Alerts)
               </label>
               <div className="relative flex items-center">
                 <Mail className="w-4 h-4 text-zinc-400 absolute left-4 pointer-events-none" />
@@ -354,7 +405,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
             <div>
               <h3 className="text-lg og-bold text-white">Registered Household Roster</h3>
               <p className="text-xs og-light text-zinc-400">
-                Real member accounts &amp; email addresses enrolled in this party
+                Real member accounts &amp; email addresses synced across PC and mobile
               </p>
             </div>
             <Users className="w-5 h-5 text-[#d0ff45]" />
@@ -404,18 +455,31 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
           <form onSubmit={handleJoinByCodeSubmit} className="space-y-3">
             <div className="inline-flex items-center gap-1.5 text-xs og-medium text-[#d0ff45]">
               <KeyRound className="w-4 h-4" />
-              <span>Join Another Household by Code</span>
+              <span>Join Another Household by 6-Char Code</span>
             </div>
             <div className="flex gap-2">
               <input
                 type="text"
+                maxLength={8}
                 value={joinCodeInput}
-                onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
-                placeholder="Enter 6-char invite code"
+                onChange={(e) => {
+                  const cleaned = e.target.value
+                    .toUpperCase()
+                    .replace(/[^A-Z0-9]/g, '')
+                    .slice(0, 6);
+                  const formatted =
+                    cleaned.length > 3
+                      ? `${cleaned.slice(0, 3)}-${cleaned.slice(3, 6)}`
+                      : cleaned;
+                  setJoinCodeInput(formatted);
+                }}
+                placeholder="e.g. BIN-7X4"
+                data-testid="party-switch-join-code-input"
                 className="pill-input flex-1 px-4 py-3 rounded-full text-xs font-mono text-white placeholder:text-zinc-500"
               />
               <button
                 type="submit"
+                data-testid="party-switch-join-btn"
                 className="px-4 py-3 rounded-full bg-[#d0ff45] text-[#041206] og-bold text-xs shrink-0"
               >
                 Join
@@ -475,6 +539,138 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
             </button>
           </form>
         </div>
+      </div>
+
+      {/* Household Membership Controls: Leave Party & Delete Party (Host) */}
+      <div className="glass-panel rounded-[32px] p-6 sm:p-8 border border-white/10 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="inline-flex items-center gap-2 text-xs og-medium text-amber-300">
+              <AlertTriangle className="w-4 h-4" />
+              <span>Household Membership &amp; Party Controls</span>
+            </div>
+            <h3 className="text-lg og-bold text-white">
+              Leave or Delete &ldquo;{party.name}&rdquo;
+            </h3>
+            <p className="text-xs og-light text-zinc-400 max-w-2xl leading-relaxed">
+              {isHostOrAdmin
+                ? nextRoommateForHostTransfer
+                  ? `As Party Host, leaving transfers the Host role to ${nextRoommateForHostTransfer.displayName} (${nextRoommateForHostTransfer.email}), or you can permanently delete this household party for all ${party.members.length} members.`
+                  : 'You are currently the only member in this household. Leaving or deleting will close this party and return you to the setup screen.'
+                : 'Leaving removes your account from this household rotation and returns you to the Create / Join Party screen.'}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
+            {onLeaveParty && (
+              <button
+                type="button"
+                data-testid="leave-party-trigger-btn"
+                onClick={() => {
+                  setActionError(null);
+                  setConfirmAction('leave');
+                }}
+                className="px-5 py-3 rounded-full bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/40 text-amber-200 og-bold text-xs flex items-center gap-2 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>
+                  {isHostOrAdmin && nextRoommateForHostTransfer
+                    ? 'Leave & Transfer Host'
+                    : 'Leave Household Party'}
+                </span>
+              </button>
+            )}
+
+            {isHostOrAdmin && onDeleteParty && (
+              <button
+                type="button"
+                data-testid="delete-party-trigger-btn"
+                onClick={() => {
+                  setActionError(null);
+                  setConfirmAction('delete');
+                }}
+                className="px-5 py-3 rounded-full bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/50 text-rose-200 og-bold text-xs flex items-center gap-2 transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Delete Party for Everyone</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {actionError && (
+          <p className="text-xs text-rose-400 og-medium">{actionError}</p>
+        )}
+
+        {confirmAction === 'leave' && (
+          <div
+            data-testid="confirm-leave-party-panel"
+            className="p-4 sm:p-5 rounded-2xl bg-amber-950/40 border border-amber-400/45 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-view-enter"
+          >
+            <div className="space-y-1">
+              <p className="text-sm og-bold text-white">
+                Confirm leaving &ldquo;{party.name}&rdquo;?
+              </p>
+              <p className="text-xs text-amber-200/90">
+                {isHostOrAdmin && nextRoommateForHostTransfer
+                  ? `Host permissions will automatically transfer to ${nextRoommateForHostTransfer.displayName} (${nextRoommateForHostTransfer.email}).`
+                  : 'You can rejoin anytime using the 6-character household invite code.'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setConfirmAction(null)}
+                className="px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/15 text-xs og-medium text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isActionPending}
+                data-testid="confirm-leave-party-btn"
+                onClick={handleExecuteLeaveParty}
+                className="px-5 py-2.5 rounded-full bg-amber-400 hover:bg-amber-300 text-[#041206] text-xs og-bold"
+              >
+                {isActionPending ? 'Leaving...' : 'Yes, Leave Party'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {confirmAction === 'delete' && (
+          <div
+            data-testid="confirm-delete-party-panel"
+            className="p-4 sm:p-5 rounded-2xl bg-rose-950/50 border border-rose-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-view-enter"
+          >
+            <div className="space-y-1">
+              <p className="text-sm og-bold text-white">
+                Permanently delete &ldquo;{party.name}&rdquo; for all {party.members.length} members?
+              </p>
+              <p className="text-xs text-rose-200/90">
+                This dissolves the household party, clears its invite code ({formattedInviteCode}), and returns all members to the Create / Join Party screen.
+              </p>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setConfirmAction(null)}
+                className="px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/15 text-xs og-medium text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isActionPending}
+                data-testid="confirm-delete-party-btn"
+                onClick={handleExecuteDeleteParty}
+                className="px-5 py-2.5 rounded-full bg-rose-500 hover:bg-rose-400 text-slate-950 text-xs og-bold"
+              >
+                {isActionPending ? 'Deleting Party...' : 'Yes, Delete Party'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

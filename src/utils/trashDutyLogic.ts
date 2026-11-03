@@ -118,6 +118,7 @@ export interface EmailDispatchLog {
   type: EmailAlertType;
   sentAt: string;
   deliveryStatus:
+    | 'PUSH_NOTIFICATION_SENT'
     | 'SENT_VIA_SMTP'
     | 'FAILED_NEEDS_APP_PASSWORD'
     | 'SENT_FROM_BINDROP_OFFICIAL'
@@ -136,7 +137,23 @@ export interface PartyAlertItem {
   targetEmail?: string;
   assigneeUserId: string;
   assigneeDisplayName: string;
-  type: 'WARNING_5H' | 'TURN_REMINDER' | 'HOST_ESCALATION' | 'TURN_COMPLETED';
+  senderName?: string;
+  senderPhotoURL?: string;
+  title?: string;
+  category?:
+    | 'WARNING_5H'
+    | 'MISSED_DEADLINE'
+    | 'TURN_REMINDER'
+    | 'PHOTO_SUBMITTED'
+    | 'PHOTO_VERIFIED'
+    | 'MEMBER_JOINED'
+    | 'PARTY_UPDATED';
+  type:
+    | 'WARNING_5H'
+    | 'MISSED_DEADLINE'
+    | 'TURN_REMINDER'
+    | 'HOST_ESCALATION'
+    | 'TURN_COMPLETED';
   message: string;
   read: boolean;
   createdAt: string;
@@ -216,18 +233,54 @@ export function encodeGmailRawMessage(params: {
 }
 
 /**
- * Generates a unique, human-friendly household invite code (e.g. "BIN-7X4K").
+ * Strips non-alphanumeric characters and uppercases for exact 6-slot comparison.
+ */
+export function normalizeInviteCode(code: string): string {
+  return String(code || '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase();
+}
+
+/**
+ * Formats an invite code into a clean 6-character `XXX-XXX` representation
+ * so that all 6 alphanumeric characters match the 6 visual boxes in the UI.
+ */
+export function formatSixCharInviteCode(code: string): string {
+  const raw = normalizeInviteCode(code);
+  if (raw.length < 6) {
+    const padded = raw.padEnd(6, 'X');
+    return `${padded.slice(0, 3)}-${padded.slice(3, 6)}`;
+  }
+  return `${raw.slice(0, 3)}-${raw.slice(3, 6)}`;
+}
+
+/**
+ * Compares a party's invite code against a user's entered code.
+ * Supports 6-character codes (`XXX-XXX` / `XXXXXX`) and legacy 7-character codes
+ * (including when a roommate enters the first 6 characters shown in the 6 boxes).
+ */
+export function doesInviteCodeMatch(partyInviteCode: string, inputCode: string): boolean {
+  const normParty = normalizeInviteCode(partyInviteCode);
+  const normInput = normalizeInviteCode(inputCode);
+  if (!normParty || !normInput || normInput.length < 4) return false;
+  if (normParty === normInput) return true;
+  if (normParty.slice(0, 6) === normInput.slice(0, 6) && normInput.length >= 6) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Generates a unique, human-friendly 6-character household invite code (e.g. "BIN-7X4")
+ * matching the 6 visual character boxes in the UI (3-char prefix + 3-char suffix).
  */
 export function generateInviteCode(prefix = 'BIN', randomValue = Math.random()): string {
-  const cleanPrefix =
-    prefix
-      .replace(/[^A-Za-z0-9]/g, '')
-      .toUpperCase()
-      .slice(0, 3) || 'BIN';
+  const rawPrefix = prefix.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  const cleanPrefix = (rawPrefix + 'BIN').slice(0, 3);
   const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   let suffix = '';
   let seed = Math.floor(randomValue * 1_000_000) + 1337;
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 3; i++) {
     suffix += alphabet[seed % alphabet.length];
     seed = Math.floor(seed / alphabet.length) + (i + 1) * 19;
   }
@@ -235,8 +288,8 @@ export function generateInviteCode(prefix = 'BIN', randomValue = Math.random()):
 }
 
 export function validateInviteCode(code: string): boolean {
-  const normalized = code.trim().toUpperCase();
-  return /^[A-Z0-9]{2,4}-[A-Z0-9]{3,6}$/.test(normalized) || /^[A-Z0-9]{4,12}$/.test(normalized);
+  const clean = normalizeInviteCode(code);
+  return clean.length >= 4 && clean.length <= 12;
 }
 
 /**
@@ -484,3 +537,114 @@ export function updateMemberProfile(
     updatedAt: nowIso,
   };
 }
+
+/**
+ * Removes a member from a household party.
+ * - If no members remain, returns `updatedParty: null` (party is dissolved).
+ * - If the leaving member was the Host, automatically transfers the `HOST` role
+ *   to the next remaining roommate in line (`remainingMembers[0]`).
+ * - Preserves or advances the active turn cleanly.
+ */
+export function leavePartyMember(
+  party: PartyState,
+  userId: string,
+  userEmail?: string,
+  nowIso: string = new Date().toISOString()
+): {
+  updatedParty: PartyState | null;
+  dissolved: boolean;
+  leftMember?: HouseholdMember;
+  removedMember?: HouseholdMember;
+  promotedHost?: HouseholdMember;
+  newHost?: HouseholdMember;
+  hostTransferred: boolean;
+} {
+  const cleanEmail = (userEmail || '').trim().toLowerCase();
+  const leavingIndex = party.members.findIndex(
+    (m) => m.uid === userId || (cleanEmail && m.email.toLowerCase() === cleanEmail)
+  );
+  if (leavingIndex === -1) {
+    return { updatedParty: party, dissolved: false, hostTransferred: false };
+  }
+
+  const leftMember = party.members[leavingIndex];
+  const remainingMembers = party.members
+    .filter((_, idx) => idx !== leavingIndex)
+    .map((m) => ({ ...m }));
+
+  if (remainingMembers.length === 0) {
+    return {
+      updatedParty: null,
+      dissolved: true,
+      leftMember,
+      removedMember: leftMember,
+      hostTransferred: false,
+    };
+  }
+
+  const wasHost = Boolean(
+    party.hostId === leftMember.uid ||
+      leftMember.role === 'HOST' ||
+      (cleanEmail && party.hostEmail.toLowerCase() === cleanEmail)
+  );
+
+  let nextHostId = party.hostId;
+  let nextHostEmail = party.hostEmail;
+  let promotedHost: HouseholdMember | undefined;
+
+  if (wasHost) {
+    remainingMembers[0].role = 'HOST';
+    nextHostId = remainingMembers[0].uid;
+    nextHostEmail = remainingMembers[0].email;
+    promotedHost = remainingMembers[0];
+  }
+
+  const wasCurrentTurn =
+    party.currentTurnUserId === leftMember.uid || party.currentTurnIndex === leavingIndex;
+
+  let nextTurnIndex = 0;
+  let nextTurnUserId = remainingMembers[0].uid;
+
+  if (wasCurrentTurn) {
+    nextTurnIndex = leavingIndex % remainingMembers.length;
+    nextTurnUserId = remainingMembers[nextTurnIndex].uid;
+  } else {
+    const activeIdx = remainingMembers.findIndex(
+      (m) => m.uid === party.currentTurnUserId
+    );
+    nextTurnIndex = activeIdx >= 0 ? activeIdx : 0;
+    nextTurnUserId = remainingMembers[nextTurnIndex].uid;
+  }
+
+  const updatedParty: PartyState = {
+    ...party,
+    inviteCode: formatSixCharInviteCode(party.inviteCode),
+    hostId: nextHostId,
+    hostEmail: nextHostEmail,
+    memberIds: remainingMembers.map((m) => m.uid),
+    members: remainingMembers,
+    currentTurnIndex: nextTurnIndex,
+    currentTurnUserId: nextTurnUserId,
+    ...(wasCurrentTurn
+      ? {
+          turnStatus: 'PENDING' as TurnStatus,
+          warningEmailSentForCurrentTurn: false,
+          missedEmailSentForCurrentTurn: false,
+          hostAlertedForCurrentTurn: false,
+          reminderSentForCurrentTurn: false,
+        }
+      : {}),
+    updatedAt: nowIso,
+  };
+
+  return {
+    updatedParty,
+    dissolved: false,
+    leftMember,
+    removedMember: leftMember,
+    promotedHost,
+    newHost: promotedHost,
+    hostTransferred: wasHost,
+  };
+}
+

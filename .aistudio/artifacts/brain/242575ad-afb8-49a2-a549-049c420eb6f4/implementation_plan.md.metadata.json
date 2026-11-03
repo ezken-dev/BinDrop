@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for fixing 6-character party invite codes, adding Leave Party and Delete Party controls, guaranteeing cross-device (PC + Mobile) account & party persistence across updates, and replacing email alerts with real-time Facebook/Instagram-style pop-up & browser push notifications.",
+  "updatedAt": "2026-11-03T03:36:41.706177588Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

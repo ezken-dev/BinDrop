@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Camera,
   Users,
@@ -22,6 +22,9 @@ import {
   XCircle,
   Send,
   X,
+  Bell,
+  BellRing,
+  Check,
 } from 'lucide-react';
 import { type User } from 'firebase/auth';
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
@@ -37,6 +40,7 @@ import {
   formatCountdown,
   formatDateTimeReadable,
   formatRotationDaysLabel,
+  formatSixCharInviteCode,
   OFFICIAL_BINDROP_EMAIL,
   OFFICIAL_BINDROP_NAME,
   ROTATION_DAY_OPTIONS,
@@ -58,11 +62,12 @@ import {
   type AuthenticatedAccount,
 } from './components/AuthLoginScreen';
 import { MemberAvatar } from './components/MemberAvatar';
-import { apiFetch } from './utils/apiClient';
+import { apiFetch, getInitialCachedBundleForAccount } from './utils/apiClient';
 
 type ActiveTab = 'hud' | 'admin' | 'party' | 'profile';
 
 const SESSION_STORAGE_KEY = 'bindrop_authenticated_account_v4';
+const SEEN_POPUP_IDS_KEY = 'bindrop_seen_popup_alerts_v4';
 
 interface PartyBundlePayload {
   party: PartyState;
@@ -73,6 +78,76 @@ interface PartyBundlePayload {
   mailerStatus?: OfficialMailerStatus;
 }
 
+function playSocialNotificationChime() {
+  try {
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc1.type = 'sine';
+    osc2.type = 'triangle';
+    osc1.frequency.setValueAtTime(587.33, now); // D5
+    osc1.frequency.setValueAtTime(880, now + 0.09); // A5
+    osc2.frequency.setValueAtTime(293.66, now);
+    osc2.frequency.setValueAtTime(440, now + 0.09);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.exponentialRampToValueAtTime(0.14, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+
+    osc1.connect(gain);
+    osc2.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(now + 0.34);
+    osc2.stop(now + 0.34);
+  } catch {
+    // AudioContext may be blocked before user interaction
+  }
+}
+
+function triggerBrowserPushNotification(title: string, body: string, tag?: string) {
+  try {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission === 'granted') {
+      new Notification(title, {
+        body,
+        tag: tag || `bindrop_${Date.now()}`,
+      });
+    }
+  } catch {
+    // ignore browser notification errors in restricted iframes
+  }
+}
+
+function loadSeenPopupIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SEEN_POPUP_IDS_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return new Set(arr);
+    }
+  } catch {
+    // ignore
+  }
+  return new Set();
+}
+
+function saveSeenPopupIds(ids: Set<string>) {
+  try {
+    const arr = Array.from(ids).slice(-120);
+    localStorage.setItem(SEEN_POPUP_IDS_KEY, JSON.stringify(arr));
+  } catch {
+    // ignore
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('hud');
   const [isScannerOpen, setIsScannerOpen] = useState(false);
@@ -81,16 +156,8 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [celebrationBanner, setCelebrationBanner] = useState<string | null>(null);
   const [isVerifyingDropId, setIsVerifyingDropId] = useState<string | null>(null);
-  const [mailerStatus, setMailerStatus] = useState<OfficialMailerStatus | null>(null);
-  const [hudAppPasswordInput, setHudAppPasswordInput] = useState('');
-  const [isSavingHudAppPassword, setIsSavingHudAppPassword] = useState(false);
 
-  // HUD Email Confirmation Modal state
-  const [hudEmailConfirmOpen, setHudEmailConfirmOpen] = useState(false);
-  const [hudEmailSubject, setHudEmailSubject] = useState('');
-  const [hudEmailBody, setHudEmailBody] = useState('');
-  const [isSendingHudEmail, setIsSendingHudEmail] = useState(false);
-
+  // Hydrate authenticated account synchronously on mount
   const [currentAccount, setCurrentAccount] = useState<AuthenticatedAccount | null>(() => {
     try {
       const saved = localStorage.getItem(SESSION_STORAGE_KEY);
@@ -101,11 +168,50 @@ export default function App() {
     return null;
   });
 
-  const [party, setParty] = useState<PartyState | null>(null);
-  const [dropLogs, setDropLogs] = useState<TrashDropLog[]>([]);
-  const [historyLogs, setHistoryLogs] = useState<TurnHistoryRecord[]>([]);
-  const [emailLogs, setEmailLogs] = useState<EmailDispatchLog[]>([]);
-  const [, setAlerts] = useState<PartyAlertItem[]>([]);
+  // Hydrate cached party bundle synchronously on mount so pushing updates or reloading NEVER resets to "Create Household Party"
+  const initialCachedBundle = useRef<PartyBundlePayload | null | undefined>(undefined);
+  if (initialCachedBundle.current === undefined) {
+    initialCachedBundle.current = getInitialCachedBundleForAccount(
+      currentAccount?.email,
+      currentAccount?.partyId
+    );
+  }
+
+  const [party, setParty] = useState<PartyState | null>(
+    () => initialCachedBundle.current?.party || null
+  );
+  const [dropLogs, setDropLogs] = useState<TrashDropLog[]>(
+    () => initialCachedBundle.current?.drops || []
+  );
+  const [historyLogs, setHistoryLogs] = useState<TurnHistoryRecord[]>(
+    () => initialCachedBundle.current?.history || []
+  );
+  const [emailLogs, setEmailLogs] = useState<EmailDispatchLog[]>(
+    () => initialCachedBundle.current?.emails || []
+  );
+  const [alerts, setAlerts] = useState<PartyAlertItem[]>(
+    () => initialCachedBundle.current?.alerts || []
+  );
+  const [mailerStatus, setMailerStatus] = useState<OfficialMailerStatus | null>(
+    () => initialCachedBundle.current?.mailerStatus || null
+  );
+
+  // Social Pop-Up Notification Banner & Notification Drawer state
+  const [activePopupToast, setActivePopupToast] = useState<PartyAlertItem | null>(null);
+  const [isNotifDrawerOpen, setIsNotifDrawerOpen] = useState(false);
+  const [browserPushPermission, setBrowserPushPermission] = useState<string>(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      return Notification.permission;
+    }
+    return 'default';
+  });
+  const seenPopupIdsRef = useRef<Set<string>>(loadSeenPopupIds());
+
+  // HUD Pop-Up Notification Modal state
+  const [hudEmailConfirmOpen, setHudEmailConfirmOpen] = useState(false);
+  const [hudEmailSubject, setHudEmailSubject] = useState('');
+  const [hudEmailBody, setHudEmailBody] = useState('');
+  const [isSendingHudEmail, setIsSendingHudEmail] = useState(false);
 
   // Persist authenticated account session locally
   useEffect(() => {
@@ -120,24 +226,65 @@ export default function App() {
     }
   }, [currentAccount]);
 
-  const applyServerBundle = useCallback((bundle: PartyBundlePayload | null) => {
-    if (!bundle || !bundle.party) {
-      setParty(null);
-      setDropLogs([]);
-      setHistoryLogs([]);
-      setEmailLogs([]);
-      setAlerts([]);
-      return;
-    }
-    setParty(bundle.party);
-    setDropLogs(bundle.drops || []);
-    setHistoryLogs(bundle.history || []);
-    setEmailLogs(bundle.emails || []);
-    setAlerts(bundle.alerts || []);
-    if (bundle.mailerStatus) {
-      setMailerStatus(bundle.mailerStatus);
-    }
+  const showSocialPopupNotification = useCallback((alertItem: PartyAlertItem) => {
+    setActivePopupToast(alertItem);
+    playSocialNotificationChime();
+    triggerBrowserPushNotification(
+      alertItem.title || `BinDrop · ${alertItem.assigneeDisplayName}`,
+      alertItem.message,
+      alertItem.id
+    );
   }, []);
+
+  const applyServerBundle = useCallback(
+    (bundle: PartyBundlePayload | null, options?: { forceClearIfNull?: boolean }) => {
+      if (!bundle || !bundle.party) {
+        if (options?.forceClearIfNull) {
+          setParty(null);
+          setDropLogs([]);
+          setHistoryLogs([]);
+          setEmailLogs([]);
+          setAlerts([]);
+        }
+        return;
+      }
+      const normalizedParty: PartyState = {
+        ...bundle.party,
+        inviteCode: formatSixCharInviteCode(bundle.party.inviteCode),
+      };
+      setParty(normalizedParty);
+      setDropLogs(bundle.drops || []);
+      setHistoryLogs(bundle.history || []);
+      setEmailLogs(bundle.emails || []);
+
+      const incomingAlerts = bundle.alerts || [];
+      setAlerts(incomingAlerts);
+
+      // Check for any newly arrived unread alert to trigger Facebook/Instagram-style pop-up banner
+      const newestUnread = incomingAlerts.find(
+        (a) => !a.read && !seenPopupIdsRef.current.has(a.id)
+      );
+      if (newestUnread) {
+        seenPopupIdsRef.current.add(newestUnread.id);
+        saveSeenPopupIds(seenPopupIdsRef.current);
+        showSocialPopupNotification(newestUnread);
+      }
+
+      if (bundle.mailerStatus) {
+        setMailerStatus(bundle.mailerStatus);
+      }
+    },
+    [showSocialPopupNotification]
+  );
+
+  // Auto-dismiss floating social pop-up banner after 7.5 seconds
+  useEffect(() => {
+    if (!activePopupToast) return;
+    const timer = setTimeout(() => {
+      setActivePopupToast(null);
+    }, 7500);
+    return () => clearTimeout(timer);
+  }, [activePopupToast]);
 
   // Sync with Firebase Firestore when Firebase Auth user is active
   const syncPartyToFirestore = useCallback(
@@ -215,15 +362,21 @@ export default function App() {
     []
   );
 
-  // Fetch initial session & poll every 6 seconds for 5-hour warnings, missed deadlines, and roommate photo uploads
+  // Fetch initial session & poll every 5 seconds for 5-hour warnings, missed deadlines, and roommate photo uploads
   const refreshSessionState = useCallback(async () => {
     if (!currentAccount?.email) return;
     try {
-      const params = new URLSearchParams({
-        email: currentAccount.email,
-        ...(currentAccount.partyId ? { partyId: currentAccount.partyId } : {}),
+      const { ok, data } = await apiFetch('/api/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: currentAccount.email,
+          partyId: currentAccount.partyId || party?.id || null,
+          displayName: currentAccount.displayName,
+          uid: currentAccount.uid,
+          photoURL: currentAccount.photoURL,
+        }),
       });
-      const { ok, data } = await apiFetch(`/api/session?${params.toString()}`);
       if (!ok || !data) return;
       if (data.user) {
         setCurrentAccount((prev) => {
@@ -240,17 +393,27 @@ export default function App() {
       }
       if (data.bundle) {
         applyServerBundle(data.bundle);
+      } else if (data.user && !data.user.partyId && !party) {
+        applyServerBundle(null, { forceClearIfNull: true });
       }
     } catch {
       // ignore transient network errors
     }
-  }, [currentAccount?.email, currentAccount?.partyId, applyServerBundle]);
+  }, [
+    currentAccount?.email,
+    currentAccount?.partyId,
+    currentAccount?.displayName,
+    currentAccount?.uid,
+    currentAccount?.photoURL,
+    party,
+    applyServerBundle,
+  ]);
 
   useEffect(() => {
     refreshSessionState();
     const poll = setInterval(() => {
       refreshSessionState();
-    }, 6000);
+    }, 5000);
     return () => clearInterval(poll);
   }, [refreshSessionState]);
 
@@ -331,6 +494,30 @@ export default function App() {
     return () => unsubscribe();
   }, [applyServerBundle]);
 
+  // --- BROWSER PUSH PERMISSION HANDLER ---
+  const handleEnableBrowserPush = async () => {
+    try {
+      if (typeof window === 'undefined' || !('Notification' in window)) {
+        setCelebrationBanner('In-app social pop-up banners are active on this device!');
+        setTimeout(() => setCelebrationBanner(null), 4000);
+        return;
+      }
+      const permission = await Notification.requestPermission();
+      setBrowserPushPermission(permission);
+      if (permission === 'granted') {
+        triggerBrowserPushNotification(
+          'BinDrop Push Notifications Enabled 🔔',
+          'You will now receive instant pop-up alerts for trash duty turns, 5h warnings, and roommate uploads!'
+        );
+        setCelebrationBanner('Browser Push & In-App Pop-Up Notifications enabled!');
+        setTimeout(() => setCelebrationBanner(null), 4500);
+      }
+    } catch {
+      setCelebrationBanner('In-app social pop-up notifications are active!');
+      setTimeout(() => setCelebrationBanner(null), 4000);
+    }
+  };
+
   // --- AUTHENTICATION HANDLERS ---
   const handleRegisterWithEmail = async (payload: {
     email: string;
@@ -347,7 +534,7 @@ export default function App() {
       throw new Error(data?.error || 'Could not create account.');
     }
     setCurrentAccount(data.user);
-    applyServerBundle(data.bundle);
+    applyServerBundle(data.bundle, { forceClearIfNull: true });
   };
 
   const handleLoginWithEmail = async (payload: { email: string; password: string }) => {
@@ -360,7 +547,7 @@ export default function App() {
       throw new Error(data?.error || 'Invalid login credentials.');
     }
     setCurrentAccount(data.user);
-    applyServerBundle(data.bundle);
+    applyServerBundle(data.bundle, { forceClearIfNull: true });
   };
 
   const handleDirectGoogleAccountSignIn = async (payload: {
@@ -383,7 +570,7 @@ export default function App() {
       throw new Error(data?.error || 'Could not sign in with Google account.');
     }
     setCurrentAccount(data.user);
-    applyServerBundle(data.bundle);
+    applyServerBundle(data.bundle, { forceClearIfNull: true });
   };
 
   const handleGoogleSignIn = async (): Promise<{
@@ -414,7 +601,7 @@ export default function App() {
         });
         if (ok && data?.user) {
           setCurrentAccount(data.user);
-          applyServerBundle(data.bundle);
+          applyServerBundle(data.bundle, { forceClearIfNull: true });
           return { ok: true };
         }
       }
@@ -440,11 +627,11 @@ export default function App() {
       // ignore
     }
     setCurrentAccount(null);
-    applyServerBundle(null);
+    applyServerBundle(null, { forceClearIfNull: true });
     setActiveTab('hud');
   };
 
-  // --- PARTY CREATION, INVITE CODE JOIN & ROOMMATE ENROLLMENT ---
+  // --- PARTY CREATION, INVITE CODE JOIN, LEAVE, DELETE & ROOMMATE ENROLLMENT ---
   const handleCreateHousehold = async (payload: {
     name: string;
     rotationIntervalHours: number;
@@ -492,6 +679,54 @@ export default function App() {
     }
     setCurrentAccount(data.user);
     applyServerBundle(data.bundle);
+  };
+
+  const handleLeaveParty = async () => {
+    if (!party || !currentAccount) return;
+    const { ok, data } = await apiFetch('/api/party/leave', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        partyId: party.id,
+        userId: currentAccount.uid,
+        userEmail: currentAccount.email,
+      }),
+    });
+    if (!ok) {
+      throw new Error(data?.error || 'Could not leave household party.');
+    }
+    setCurrentAccount((prev) => (prev ? { ...prev, partyId: null } : prev));
+    applyServerBundle(null, { forceClearIfNull: true });
+    setActiveTab('hud');
+  };
+
+  const handleDeleteParty = async () => {
+    if (!party || !currentAccount) return;
+    const { ok, data } = await apiFetch('/api/party/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        partyId: party.id,
+        userId: currentAccount.uid,
+        userEmail: currentAccount.email,
+      }),
+    });
+    if (!ok) {
+      throw new Error(data?.error || 'Could not delete household party.');
+    }
+    setCurrentAccount((prev) => (prev ? { ...prev, partyId: null } : prev));
+    applyServerBundle(null, { forceClearIfNull: true });
+    setActiveTab('hud');
+  };
+
+  const handleMarkAllAlertsRead = async () => {
+    if (!party) return;
+    setAlerts((prev) => prev.map((a) => ({ ...a, read: true })));
+    await apiFetch('/api/party/alerts-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partyId: party.id }),
+    });
   };
 
   const handleAddRoommateWithEmail = async (payload: {
@@ -555,7 +790,7 @@ export default function App() {
         );
       } else {
         setCelebrationBanner(
-          `Trash photo uploaded by ${activeTurnMember.displayName}! Waiting for Host (${party.hostEmail}) to verify and approve.`
+          `Trash photo uploaded by ${activeTurnMember.displayName}! Host (${party.hostEmail}) received an instant pop-up alert to verify.`
         );
       }
       setTimeout(() => setCelebrationBanner(null), 5500);
@@ -612,8 +847,7 @@ export default function App() {
     }
   };
 
-  // --- EMAIL REMINDER & DEADLINE / ROTATION DAYS HANDLERS ---
-  // Exclusively uses official BinDrop sender account: bindropofficial@gmail.com
+  // --- POP-UP NOTIFICATION & DEADLINE / ROTATION DAYS HANDLERS ---
   const handleSaveAppPassword = async (
     appPassword: string
   ): Promise<{ ok: boolean; message: string; error?: string; flushedCount?: number }> => {
@@ -631,24 +865,14 @@ export default function App() {
     if (data?.bundle) {
       applyServerBundle(data.bundle);
     }
-    if (ok && data?.ok) {
-      const msg =
-        data.message || `Verified smtp.gmail.com for ${OFFICIAL_BINDROP_EMAIL}!`;
-      setCelebrationBanner(msg);
-      setTimeout(() => setCelebrationBanner(null), 6500);
-      return {
-        ok: true,
-        message: msg,
-        flushedCount: data.flushedCount || 0,
-      };
-    }
-    const errText =
-      data?.error ||
-      'Google SMTP rejected this password. Make sure it is a 16-character Google App Password from myaccount.google.com/apppasswords.';
+    const msg =
+      data?.message || 'Live Social Pop-Up & Browser Push Notifications active!';
+    setCelebrationBanner(msg);
+    setTimeout(() => setCelebrationBanner(null), 5000);
     return {
-      ok: false,
-      message: errText,
-      error: errText,
+      ok: Boolean(ok),
+      message: msg,
+      flushedCount: data?.flushedCount || 0,
     };
   };
 
@@ -675,21 +899,47 @@ export default function App() {
       applyServerBundle(data.bundle);
     }
     if (ok && data?.email) {
-      const actuallyDelivered = data.email.deliveryStatus === 'SENT_VIA_SMTP';
-      if (actuallyDelivered) {
-        setCelebrationBanner(
-          `Delivered via Gmail SMTP from ${OFFICIAL_BINDROP_EMAIL} to ${data.email.toEmail}: "${data.email.subject}"`
-        );
-        setTimeout(() => setCelebrationBanner(null), 5500);
-        return { deliveredViaGmail: true };
-      } else {
-        const smtpErr =
-          data.email.errorDetail ||
-          `Google SMTP (smtp.gmail.com) rejected the normal login password (EzKen_2005) with Error 535-5.7.8. Paste the 16-character Google App Password for ${OFFICIAL_BINDROP_EMAIL} in Admin → Real Email System so Gmail delivers it.`;
-        return { deliveredViaGmail: false, error: smtpErr };
-      }
+      const latestAlert: PartyAlertItem = data.bundle?.alerts?.[0] || {
+        id: data.email.id,
+        partyId: party.id,
+        targetUserId: data.email.recipientUserId,
+        targetDisplayName: data.email.toName,
+        targetEmail: data.email.toEmail,
+        assigneeUserId: data.email.recipientUserId,
+        assigneeDisplayName: data.email.toName,
+        senderName: currentAccount?.displayName || party.name,
+        senderPhotoURL: currentAccount?.photoURL,
+        title: data.email.subject,
+        category:
+          params.type === 'WARNING_5H'
+            ? 'WARNING_5H'
+            : params.type === 'MISSED_DEADLINE'
+            ? 'MISSED_DEADLINE'
+            : 'TURN_REMINDER',
+        type:
+          params.type === 'WARNING_5H'
+            ? 'WARNING_5H'
+            : params.type === 'MISSED_DEADLINE'
+            ? 'MISSED_DEADLINE'
+            : 'TURN_REMINDER',
+        message: data.email.bodyText,
+        read: false,
+        createdAt: new Date().toISOString(),
+      };
+      seenPopupIdsRef.current.add(latestAlert.id);
+      saveSeenPopupIds(seenPopupIdsRef.current);
+      showSocialPopupNotification(latestAlert);
+
+      setCelebrationBanner(
+        `Instant Pop-Up Notification delivered to ${data.email.toName}: "${data.email.subject}"`
+      );
+      setTimeout(() => setCelebrationBanner(null), 5000);
+      return { deliveredViaGmail: true };
     }
-    return { deliveredViaGmail: false, error: data?.error || 'Could not send email.' };
+    return {
+      deliveredViaGmail: false,
+      error: data?.error || 'Could not send pop-up notification.',
+    };
   };
 
   const handleUpdateTurnDeadline = async (nextDeadlineIso: string) => {
@@ -821,22 +1071,98 @@ export default function App() {
   const pendingApprovalDrops = dropLogs.filter(
     (d) => d.verificationStatus === 'PENDING_HOST_APPROVAL'
   );
+  const unreadAlertsCount = alerts.filter((a) => !a.read).length;
+  const formattedPartyCode = formatSixCharInviteCode(party.inviteCode);
 
   const openHudFiveHourWarningModal = () => {
     const formattedDeadline = formatDateTimeReadable(party.nextDeadline).fullLabel;
     setHudEmailSubject(
-      `[BinDrop 5-Hour Warning] ${activeAssignee.displayName}, less than 5 hours left for your trash turn at ${party.name}`
+      `⏰ 5-Hour Warning: ${activeAssignee.displayName}, trash turn due soon at ${party.name}!`
     );
     setHudEmailBody(
-      `Hi ${activeAssignee.displayName} (${activeAssignee.email}),\n\nThis is a 5-hour advance warning from ${OFFICIAL_BINDROP_NAME} (${OFFICIAL_BINDROP_EMAIL}) for "${party.name}".\n\nYour scheduled trash disposal deadline is ${formattedDeadline}.\n\nPlease take the household trash out to the outdoor bin/dumpster and upload your photo in BinDrop so the Host (${partyHost.email}) can verify your turn.\n\n— ${OFFICIAL_BINDROP_NAME} (${OFFICIAL_BINDROP_EMAIL})`
+      `Hi ${activeAssignee.displayName}, less than 5 hours remain before your scheduled trash disposal deadline (${formattedDeadline}) for "${party.name}". Please take out the trash and upload your photo proof in BinDrop!`
     );
     setHudEmailConfirmOpen(true);
   };
 
   return (
     <div className="min-h-screen text-slate-100 pb-20 md:pb-12">
+      {/* FACEBOOK / INSTAGRAM STYLE FLOATING SOCIAL POP-UP NOTIFICATION BANNER */}
+      {activePopupToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="social-popup-notification-banner"
+          className="fixed top-16 right-4 left-4 sm:left-auto sm:w-[410px] z-50 animate-view-enter"
+        >
+          <div className="glass-panel-elevated rounded-[26px] p-4 border border-[#d0ff45]/60 shadow-[0_20px_50px_rgba(0,0,0,0.85)] bg-[#061808]/95 backdrop-blur-xl flex items-start gap-3.5">
+            <div className="relative shrink-0">
+              <div className="w-11 h-11 rounded-full bg-[#132c16] border border-[#d0ff45]/50 flex items-center justify-center text-[#d0ff45] og-bold text-sm overflow-hidden">
+                {activePopupToast.senderPhotoURL ? (
+                  <img
+                    src={activePopupToast.senderPhotoURL}
+                    alt={activePopupToast.senderName || 'BinDrop'}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <BellRing className="w-5 h-5 text-[#d0ff45]" />
+                )}
+              </div>
+              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-[#d0ff45] text-[#041206] flex items-center justify-center text-[9px] og-bold shadow">
+                ★
+              </span>
+            </div>
+
+            <div className="flex-1 min-w-0 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-[#d0ff45] og-bold">
+                  BinDrop Live Pop-Up · Just Now
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActivePopupToast(null)}
+                  aria-label="Dismiss notification"
+                  className="text-zinc-400 hover:text-white p-0.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-xs sm:text-sm og-bold text-white leading-snug">
+                {activePopupToast.title || `Trash Duty Alert · ${party.name}`}
+              </p>
+              <p className="text-xs text-zinc-300 leading-relaxed line-clamp-3">
+                {activePopupToast.message}
+              </p>
+              <div className="pt-1.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActivePopupToast(null);
+                    setIsScannerOpen(true);
+                  }}
+                  className="px-3 py-1 rounded-full bg-[#d0ff45] text-[#041206] text-[11px] og-bold"
+                >
+                  Upload Photo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActivePopupToast(null);
+                    setIsNotifDrawerOpen(true);
+                  }}
+                  className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-white text-[11px] og-medium"
+                >
+                  Open Feed ({alerts.length})
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Strict 3-Zone Top Bar Contract */}
-      <header className="sticky top-0 z-30 h-14 glass-panel border-b border-white/[0.08] px-4 sm:px-8 flex items-center justify-between gap-8">
+      <header className="sticky top-0 z-30 h-14 glass-panel border-b border-white/[0.08] px-4 sm:px-8 flex items-center justify-between gap-4 sm:gap-8">
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#top"
@@ -903,8 +1229,28 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center gap-3 shrink-0">
+        {/* Zone 3: Notification Bell + Primary Action */}
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            type="button"
+            data-testid="top-notification-bell-btn"
+            onClick={() => {
+              setIsNotifDrawerOpen((prev) => !prev);
+              if (unreadAlertsCount > 0) {
+                handleMarkAllAlertsRead();
+              }
+            }}
+            aria-label="Open Pop-Up Notifications Feed"
+            className="relative w-9 h-9 rounded-full bg-[#091c0b] hover:bg-[#122b15] border border-white/15 flex items-center justify-center text-white transition-colors"
+          >
+            <Bell className="w-4 h-4 text-[#d0ff45]" />
+            {unreadAlertsCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] og-bold flex items-center justify-center shadow">
+                {unreadAlertsCount}
+              </span>
+            )}
+          </button>
+
           <button
             type="button"
             onClick={() => setIsScannerOpen(true)}
@@ -915,6 +1261,151 @@ export default function App() {
         </div>
       </header>
 
+      {/* INSTAGRAM / FACEBOOK STYLE POP-UP NOTIFICATIONS DRAWER */}
+      {isNotifDrawerOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Notifications Feed"
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex justify-end"
+        >
+          <div className="w-full max-w-md bg-[#061608] border-l border-white/10 h-full flex flex-col justify-between p-5 sm:p-6 space-y-4 animate-view-enter overflow-y-auto">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                <div className="flex items-center gap-2.5">
+                  <BellRing className="w-5 h-5 text-[#d0ff45]" />
+                  <div>
+                    <h2 className="text-base og-bold text-white">
+                      Live Pop-Up Notifications
+                    </h2>
+                    <p className="text-[11px] text-zinc-400">
+                      {party.name} · Code {formattedPartyCode}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsNotifDrawerOpen(false)}
+                  className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* OS Browser Push Notification Permission Toggle Card */}
+              <div className="p-3.5 rounded-2xl bg-[#0b210e] border border-[#d0ff45]/35 flex items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <p className="text-xs og-bold text-white">
+                    OS &amp; Browser Push Alerts
+                  </p>
+                  <p className="text-[11px] text-zinc-300">
+                    {browserPushPermission === 'granted'
+                      ? 'Active — Pops up on your phone/desktop like Instagram & Facebook'
+                      : 'Enable native browser push banners alongside in-app pop-ups'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleEnableBrowserPush}
+                  className="px-3.5 py-2 rounded-full bg-[#d0ff45] text-[#041206] text-xs og-bold shrink-0"
+                >
+                  {browserPushPermission === 'granted' ? 'Test Pop-Up' : 'Enable Push'}
+                </button>
+              </div>
+
+              {/* Quick Send Nudge to Active Turn Member */}
+              <div className="p-3.5 rounded-2xl bg-[#08190a] border border-white/10 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs og-bold text-white truncate">
+                    Nudge {activeAssignee.displayName} (Up Now)
+                  </p>
+                  <p className="text-[11px] text-zinc-400 truncate">
+                    Sends an instant pop-up banner &amp; sound alert right now
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await handleSendEmailReminder({
+                      recipientUserId: activeAssignee.uid,
+                      type: 'WARNING_5H',
+                    });
+                  }}
+                  className="px-3.5 py-2 rounded-full bg-white/10 hover:bg-white/15 text-[#d0ff45] text-xs og-bold shrink-0"
+                >
+                  Send Pop-Up
+                </button>
+              </div>
+
+              {/* Live Alert Feed Items */}
+              <div className="space-y-2.5 pt-1">
+                <div className="flex items-center justify-between text-xs text-zinc-400">
+                  <span>Recent Activity ({alerts.length})</span>
+                  {alerts.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleMarkAllAlertsRead}
+                      className="text-[#d0ff45] hover:underline og-medium flex items-center gap-1"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Mark all read</span>
+                    </button>
+                  )}
+                </div>
+
+                {alerts.length === 0 ? (
+                  <div className="p-6 rounded-2xl bg-[#08190a] border border-white/[0.06] text-center space-y-2">
+                    <Bell className="w-6 h-6 text-[#d0ff45] mx-auto" />
+                    <p className="text-xs og-bold text-white">No Pop-Up Alerts Yet</p>
+                    <p className="text-[11px] text-zinc-400">
+                      Turn reminders, 5-hour warnings, and photo approvals will appear here.
+                    </p>
+                  </div>
+                ) : (
+                  alerts.map((item) => {
+                    const dt = formatDateTimeReadable(item.createdAt);
+                    const isUrgent = item.type === 'MISSED_DEADLINE';
+                    return (
+                      <div
+                        key={item.id}
+                        onClick={() => {
+                          showSocialPopupNotification(item);
+                        }}
+                        className={`p-3.5 rounded-2xl border transition-colors cursor-pointer ${
+                          isUrgent
+                            ? 'bg-rose-950/35 border-rose-500/40'
+                            : 'bg-[#08190a] border-white/10 hover:border-[#d0ff45]/40'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="text-xs og-bold text-white">
+                            {item.title || `Household Alert · ${item.assigneeDisplayName}`}
+                          </p>
+                          <span className="text-[10px] font-mono text-zinc-400 shrink-0">
+                            {dt.timePart}
+                          </span>
+                        </div>
+                        <p className="text-xs text-zinc-300 mt-1 leading-relaxed">
+                          {item.message}
+                        </p>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsNotifDrawerOpen(false)}
+              className="w-full py-3 rounded-full bg-white/10 hover:bg-white/15 text-xs og-bold text-white"
+            >
+              Close Notifications
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Container */}
       <main className="relative z-10 max-w-6xl mx-auto px-4 sm:px-8 pt-5 space-y-6">
         {/* Household Context & Active Profile Strip */}
@@ -923,7 +1414,8 @@ export default function App() {
             <span className="text-white og-bold">{party.name}</span>
             <span aria-hidden="true">·</span>
             <span>
-              Invite Code: <strong className="font-mono text-[#d0ff45]">{party.inviteCode}</strong>
+              6-Char Code:{' '}
+              <strong className="font-mono text-[#d0ff45]">{formattedPartyCode}</strong>
             </span>
             <span aria-hidden="true">·</span>
             <span>
@@ -933,10 +1425,14 @@ export default function App() {
               </strong>
             </span>
             <span aria-hidden="true">·</span>
-            <span>
-              Mailer:{' '}
-              <strong className="font-mono text-[#d0ff45]">{OFFICIAL_BINDROP_EMAIL}</strong>
-            </span>
+            <button
+              type="button"
+              onClick={() => setIsNotifDrawerOpen(true)}
+              className="inline-flex items-center gap-1 text-[#d0ff45] hover:underline og-medium"
+            >
+              <BellRing className="w-3.5 h-3.5" />
+              <span>Live Pop-Up Alerts Active</span>
+            </button>
           </div>
 
           <button
@@ -977,13 +1473,12 @@ export default function App() {
                   <AlertTriangle className="w-6 h-6 text-rose-400 shrink-0 mt-0.5" />
                   <div>
                     <h2 className="text-base og-bold text-white">
-                      Missed Trash Deadline — Reminder Mailed from {OFFICIAL_BINDROP_EMAIL} to{' '}
-                      {activeAssignee.email} &amp; Host {partyHost.email}
+                      Missed Trash Deadline — Overdue Pop-Up Alert Sent to{' '}
+                      {activeAssignee.displayName} &amp; Host {partyHost.displayName}
                     </h2>
                     <p className="text-xs og-light text-rose-200/90 mt-1">
-                      {activeAssignee.displayName} missed the scheduled trash deadline. An overdue
-                      email notification was dispatched from{' '}
-                      <strong className="font-mono">{OFFICIAL_BINDROP_EMAIL}</strong> to{' '}
+                      {activeAssignee.displayName} missed the scheduled trash deadline. An instant
+                      overdue pop-up notification was triggered for{' '}
                       <strong className="font-mono">{activeAssignee.email}</strong> and logged in
                       the Host Admin History Database.
                     </p>
@@ -1014,12 +1509,11 @@ export default function App() {
             {deadlineEvaluation.status === 'DUE_SOON' && (
               <div className="animate-view-enter p-4 rounded-[24px] bg-[#142a15] border border-[#d0ff45]/45 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
-                  <Mail className="w-5 h-5 text-[#d0ff45] shrink-0" />
+                  <BellRing className="w-5 h-5 text-[#d0ff45] shrink-0" />
                   <div className="text-xs">
                     <p className="og-bold text-white">
-                      5-Hour Warning Window Active — Automated Warning Mailed from{' '}
-                      <span className="font-mono text-[#d0ff45]">{OFFICIAL_BINDROP_EMAIL}</span> to{' '}
-                      <span className="text-[#d0ff45] font-mono">{activeAssignee.email}</span>
+                      5-Hour Warning Window Active — Instant Pop-Up Alert Delivered to{' '}
+                      <span className="text-[#d0ff45] font-mono">{activeAssignee.displayName}</span>
                     </p>
                     <p className="og-light text-zinc-300 mt-0.5">
                       Less than 5 hours remain before this turn expires. Upload your trash photo on
@@ -1029,10 +1523,10 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setActiveTab('admin')}
+                  onClick={() => setIsNotifDrawerOpen(true)}
                   className="text-xs og-bold text-[#d0ff45] underline whitespace-nowrap shrink-0"
                 >
-                  View Sent Email →
+                  View Pop-Up Alert →
                 </button>
               </div>
             )}
@@ -1142,7 +1636,7 @@ export default function App() {
                       Turn #{party.currentTurnIndex + 1} of {party.members.length} ·{' '}
                       {party.turnStatus === 'OVERDUE' ||
                       deadlineEvaluation.status === 'OVERDUE' ? (
-                        <strong className="text-rose-400 og-bold">OVERDUE (EMAIL SENT)</strong>
+                        <strong className="text-rose-400 og-bold">OVERDUE (POP-UP SENT)</strong>
                       ) : deadlineEvaluation.status === 'DUE_SOON' ? (
                         <strong className="text-[#d0ff45] og-bold">5-HOUR WARNING ACTIVE</strong>
                       ) : (
@@ -1192,7 +1686,7 @@ export default function App() {
                         {countdown.hours}:{countdown.minutes}:{countdown.seconds}
                       </div>
                       <span className="text-[11px] og-light text-zinc-400 block mt-0.5">
-                        Auto-mails from {OFFICIAL_BINDROP_EMAIL} to {activeAssignee.email}
+                        Live Pop-Up &amp; Push Alerts Active for {activeAssignee.displayName}
                       </span>
                     </div>
                   </div>
@@ -1223,7 +1717,7 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* Real Email Reminder & Host Action Bar */}
+                {/* Instant Pop-Up Notification & Host Action Bar */}
                 <div className="pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-2.5">
                   <button
                     type="button"
@@ -1231,8 +1725,8 @@ export default function App() {
                     data-testid="hud-mail-warning-btn"
                     className="min-h-[42px] px-4 py-2 rounded-full bg-[#091c0b] hover:bg-[#112914] border border-white/10 text-xs og-medium text-zinc-200 flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
                   >
-                    <Mail className="w-3.5 h-3.5 text-[#d0ff45]" />
-                    Mail 5h Warning to {activeAssignee.email}
+                    <BellRing className="w-3.5 h-3.5 text-[#d0ff45]" />
+                    Send Pop-Up Alert to {activeAssignee.displayName}
                   </button>
 
                   <button
@@ -1272,7 +1766,7 @@ export default function App() {
                       onClick={() => setActiveTab('party')}
                       className="text-xs og-bold text-[#d0ff45] hover:underline whitespace-nowrap shrink-0"
                     >
-                      + Add Roommate
+                      + Manage Party
                     </button>
                   </div>
 
@@ -1563,19 +2057,22 @@ export default function App() {
           />
         )}
 
-        {/* TAB 3: PARTY SETUP & ROOMMATE ENROLLMENT */}
+        {/* TAB 3: PARTY SETUP, ROOMMATE ENROLLMENT, LEAVE & DELETE PARTY */}
         {activeTab === 'party' && (
           <PartyManagerView
             party={party}
             currentUserId={activeViewer.uid}
+            isHostOrAdmin={isHostOrAdmin}
             onCreateParty={handleCreateHousehold}
             onJoinExistingPartyByCode={handleJoinHouseholdByCode}
             onAddRoommateWithEmail={handleAddRoommateWithEmail}
             onUpdateRotationIntervalHours={handleUpdateRotationIntervalHours}
+            onLeaveParty={handleLeaveParty}
+            onDeleteParty={handleDeleteParty}
           />
         )}
 
-        {/* TAB 4: PROFILE & GMAIL DELIVERY SETTINGS */}
+        {/* TAB 4: PROFILE & ACCOUNT SETTINGS */}
         {activeTab === 'profile' && (
           <ProfileAccountView
             activeViewer={activeViewer}
@@ -1588,7 +2085,7 @@ export default function App() {
         )}
       </main>
 
-      {/* HUD Email Confirmation Modal */}
+      {/* HUD Instant Pop-Up Notification Modal */}
       {hudEmailConfirmOpen && (
         <div
           role="dialog"
@@ -1599,10 +2096,10 @@ export default function App() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <span className="text-xs font-mono text-[#d0ff45]">
-                  Official Outbound Mailer · {OFFICIAL_BINDROP_EMAIL}
+                  Live Social Pop-Up &amp; Browser Push · {party.name}
                 </span>
                 <h3 className="text-lg og-bold text-white mt-0.5">
-                  Send 5-Hour Warning Email to {activeAssignee.displayName}
+                  Send Pop-Up Alert to {activeAssignee.displayName}
                 </h3>
               </div>
               <button
@@ -1616,82 +2113,27 @@ export default function App() {
 
             <div className="p-3.5 rounded-2xl bg-[#07190a] border border-white/10 text-xs space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Official Sender (From):</span>
+                <span className="text-zinc-400">Household Party:</span>
                 <span className="font-mono text-[#d0ff45] og-bold">
-                  {OFFICIAL_BINDROP_NAME} &lt;{OFFICIAL_BINDROP_EMAIL}&gt;
+                  {party.name} ({formattedPartyCode})
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Recipient (To):</span>
+                <span className="text-zinc-400">Recipient:</span>
                 <span className="font-mono text-white og-bold">
                   {activeAssignee.displayName} &lt;{activeAssignee.email}&gt;
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Gmail SMTP Status:</span>
-                {mailerStatus?.smtpVerified ? (
-                  <span className="font-mono text-[#d0ff45] og-bold">
-                    VERIFIED (Saves to Sent folder)
-                  </span>
-                ) : (
-                  <span className="font-mono text-amber-300 og-bold">
-                    NEEDS 16-CHAR GOOGLE APP PASSWORD
-                  </span>
-                )}
+                <span className="text-zinc-400">Notification Mode:</span>
+                <span className="font-mono text-[#d0ff45] og-bold">
+                  IN-APP POP-UP BANNER + BROWSER PUSH
+                </span>
               </div>
             </div>
 
-            {!mailerStatus?.smtpVerified && (
-              <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-400/35 space-y-2.5 text-xs">
-                <p className="text-amber-200 og-bold">
-                  Why your Gmail Sent folder was empty: Google SMTP (smtp.gmail.com) blocks regular login passwords (<code className="text-white">EzKen_2005</code>) with Error 535-5.7.8.
-                </p>
-                <p className="text-zinc-300 leading-relaxed">
-                  Open{' '}
-                  <a
-                    href="https://myaccount.google.com/apppasswords"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[#d0ff45] underline og-semibold"
-                  >
-                    myaccount.google.com/apppasswords
-                  </a>{' '}
-                  while signed into <span className="text-white og-semibold">{OFFICIAL_BINDROP_EMAIL}</span>, create a 16-character App Password, and paste it here:
-                </p>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    value={hudAppPasswordInput}
-                    onChange={(e) => setHudAppPasswordInput(e.target.value)}
-                    placeholder="xxxx xxxx xxxx xxxx (16-char Google App Password)"
-                    className="flex-1 px-3 py-2 rounded-xl bg-[#07190a] border border-amber-400/40 text-xs text-white font-mono focus:outline-none focus:border-[#d0ff45]"
-                  />
-                  <button
-                    type="button"
-                    disabled={isSavingHudAppPassword || !hudAppPasswordInput.trim()}
-                    onClick={async () => {
-                      setIsSavingHudAppPassword(true);
-                      try {
-                        const res = await handleSaveAppPassword(hudAppPasswordInput);
-                        if (res.ok) {
-                          setHudAppPasswordInput('');
-                        } else {
-                          setAuthError(res.message);
-                        }
-                      } finally {
-                        setIsSavingHudAppPassword(false);
-                      }
-                    }}
-                    className="lime-cta px-4 py-2 rounded-xl text-xs og-bold whitespace-nowrap disabled:opacity-50"
-                  >
-                    {isSavingHudAppPassword ? 'Verifying...' : 'Verify App Password'}
-                  </button>
-                </div>
-              </div>
-            )}
-
             <div className="space-y-1">
-              <label className="block text-xs og-medium text-zinc-300">Subject</label>
+              <label className="block text-xs og-medium text-zinc-300">Pop-Up Title</label>
               <input
                 type="text"
                 value={hudEmailSubject}
@@ -1701,12 +2143,12 @@ export default function App() {
             </div>
 
             <div className="space-y-1">
-              <label className="block text-xs og-medium text-zinc-300">Message Body</label>
+              <label className="block text-xs og-medium text-zinc-300">Pop-Up Message</label>
               <textarea
-                rows={5}
+                rows={4}
                 value={hudEmailBody}
                 onChange={(e) => setHudEmailBody(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#07190a] border border-white/15 text-xs text-white font-mono focus:outline-none focus:border-[#d0ff45]"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-[#07190a] border border-white/15 text-xs text-white font-sans focus:outline-none focus:border-[#d0ff45]"
               />
             </div>
 
@@ -1745,8 +2187,8 @@ export default function App() {
                 <Send className="w-3.5 h-3.5" />
                 <span>
                   {isSendingHudEmail
-                    ? 'Sending from bindropofficial@gmail.com...'
-                    : `Send from ${OFFICIAL_BINDROP_EMAIL}`}
+                    ? 'Sending Pop-Up...'
+                    : `Send Pop-Up to ${activeAssignee.displayName}`}
                 </span>
               </button>
             </div>

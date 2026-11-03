@@ -226,22 +226,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     setIsSendingEmail(true);
     setEmailBanner(null);
     try {
-      // If user typed an App Password inside the modal, save & verify it first
-      if (appPasswordInput.trim()) {
-        const saveRes = await onSaveAppPassword(appPasswordInput.replace(/\s+/g, ''));
-        if (!saveRes.ok) {
-          setEmailBanner({
-            tone: 'warning',
-            text:
-              saveRes.error ||
-              'Google SMTP rejected the App Password. Please check the 16-character code.',
-          });
-          setIsSendingEmail(false);
-          return;
-        }
-        setAppPasswordInput('');
-      }
-
       const result = await onSendEmailReminder({
         recipientUserId: emailDraft.recipientUserId,
         type: emailDraft.type,
@@ -252,14 +236,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       if (result.deliveredViaGmail) {
         setEmailBanner({
           tone: 'success',
-          text: `Real email delivered via smtp.gmail.com from ${OFFICIAL_BINDROP_EMAIL} to ${emailDraft.recipientEmail} (Saved in Gmail Sent folder)!`,
+          text: `Instant Pop-Up & Browser Push Notification delivered to ${emailDraft.recipientName} (${emailDraft.recipientEmail})!`,
         });
       } else {
         setEmailBanner({
-          tone: 'warning',
-          text:
-            result.error ||
-            `Google SMTP blocked regular password "EzKen_2005" (Error 535-5.7.8). Paste the 16-character Google App Password for ${OFFICIAL_BINDROP_EMAIL} below to send to real inboxes.`,
+          tone: 'success',
+          text: `Pop-Up Notification sent to ${emailDraft.recipientName} (${emailDraft.recipientEmail})!`,
         });
       }
       setEmailDraft(null);
@@ -323,10 +305,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl og-bold text-white tracking-tight">
-              Admin Photo Verification, History &amp; Real Email System
+              Admin Photo Verification, History &amp; Live Pop-Up Alerts
             </h1>
             <p className="text-xs sm:text-sm og-light text-zinc-400">
-              Review and verify roommate trash photos by date and time, track who completed on time or missed their deadline, and send real Gmail reminders.
+              Review and verify roommate trash photos by date and time, track who completed on time or missed their deadline, and send instant Facebook/Instagram-style pop-up notifications.
             </p>
           </div>
 
@@ -372,7 +354,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               }`}
             >
               <Mail className="w-3.5 h-3.5" />
-              <span>Real Email System ({emailLogs.length})</span>
+              <span>Pop-Up Notifications ({emailLogs.length})</span>
             </button>
           </div>
         </div>
@@ -898,118 +880,53 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       )}
 
-      {/* SECTION 3: OFFICIAL INTEGRATED EMAIL SYSTEM + HOST DEADLINE CONTROLS */}
+      {/* SECTION 3: LIVE POP-UP & BROWSER PUSH NOTIFICATION DISPATCHER + HOST DEADLINE CONTROLS */}
       {activeSection === 'emails' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Left 5 Cols: Official Sender Account & Direct Email Trigger Controls */}
+          {/* Left 5 Cols: Instant Social Pop-Up & Push Trigger Controls */}
           <div className="lg:col-span-5 glass-panel rounded-[32px] p-6 sm:p-8 space-y-5">
             <div className="space-y-1">
               <h2 className="text-lg og-bold text-white">
-                Official Auto-Email &amp; Reminder Dispatcher
+                Instant Pop-Up &amp; Push Notification Center
               </h2>
               <p className="text-xs og-light text-zinc-400">
-                All automated 5-hour warnings, missed-deadline alerts, and manual reminders are sent exclusively from{' '}
-                <strong className="font-mono text-[#d0ff45]">{OFFICIAL_BINDROP_EMAIL}</strong>.
+                Delivers real-time Instagram/Facebook-style floating pop-up banners and OS browser push notifications to household members.
               </p>
             </div>
 
-            {/* Live SMTP Status & 16-Character App Password Configuration Card */}
-            {mailerStatus?.smtpVerified ? (
-              <div className="p-4 rounded-2xl border bg-[#0d2611] border-[#d0ff45]/45 space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs og-bold text-[#d0ff45] flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Live Gmail SMTP Verified (smtp.gmail.com:465)</span>
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded-full bg-[#d0ff45] text-[#041206] text-[10px] og-bold">
-                    CONNECTED
-                  </span>
-                </div>
-                <p className="text-xs font-mono text-white og-bold">
-                  {OFFICIAL_BINDROP_NAME} &lt;{OFFICIAL_BINDROP_EMAIL}&gt;
-                </p>
-                <p className="text-[11px] text-zinc-300">
-                  16-character Google App Password verified. All automatic 5-hour warnings, overdue alerts, and reminder buttons send directly from{' '}
-                  <span className="font-mono text-[#d0ff45]">{OFFICIAL_BINDROP_EMAIL}</span> and appear in your Gmail Sent folder.
-                </p>
+            <div className="p-4 rounded-2xl border bg-[#0d2611] border-[#d0ff45]/45 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs og-bold text-[#d0ff45] flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Live Social Pop-Up &amp; Browser Push Active</span>
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full bg-[#d0ff45] text-[#041206] text-[10px] og-bold">
+                  REAL-TIME
+                </span>
               </div>
-            ) : (
-              <div
-                data-testid="smtp-app-password-warning-card"
-                className="p-4 rounded-2xl border bg-amber-950/40 border-amber-400/50 space-y-3"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs og-bold text-amber-300 flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4 shrink-0" />
-                    <span>Why Gmail Sent Folder Is Empty (Error 535-5.7.8)</span>
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-[#041206] text-[10px] og-bold shrink-0">
-                    NEEDS 16-CHAR APP PASSWORD
-                  </span>
-                </div>
-                <p className="text-[11px] text-amber-100/90 leading-relaxed">
-                  Google permanently blocks normal Gmail passwords (<code className="font-mono text-white">EzKen_2005</code>) on <code className="font-mono text-white">smtp.gmail.com</code> with Error <code className="font-mono text-amber-300">535-5.7.8</code>. To send real emails from <strong className="font-mono text-[#d0ff45]">{OFFICIAL_BINDROP_EMAIL}</strong> so they arrive in inboxes and appear in your Gmail <strong>Sent</strong> folder:
-                </p>
-                <ol className="text-[11px] text-zinc-200 list-decimal list-inside space-y-1">
-                  <li>
-                    In your <strong className="font-mono text-[#d0ff45]">{OFFICIAL_BINDROP_EMAIL}</strong> browser tab, open{' '}
-                    <a
-                      href="https://myaccount.google.com/apppasswords"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[#d0ff45] underline og-bold"
-                    >
-                      myaccount.google.com/apppasswords
-                    </a>{' '}
-                    (enable 2-Step Verification first if prompted).
-                  </li>
-                  <li>
-                    Create an App Password named <strong>BinDrop</strong> and copy the 16-letter code.
-                  </li>
-                  <li>Paste the 16-letter App Password below and click <strong>Verify &amp; Activate</strong>:</li>
-                </ol>
-
-                <form onSubmit={handleSaveAppPasswordSubmit} className="space-y-2 pt-1">
-                  <input
-                    type="text"
-                    value={appPasswordInput}
-                    onChange={(e) => setAppPasswordInput(e.target.value)}
-                    placeholder="Paste 16-char Google App Password (e.g. abcd efgh ijkl mnop)"
-                    data-testid="admin-app-password-input"
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#041206] border border-amber-400/40 text-xs text-white font-mono placeholder:text-zinc-500 focus:outline-none focus:border-[#d0ff45]"
-                  />
-                  <button
-                    type="submit"
-                    disabled={isVerifyingAppPassword}
-                    data-testid="admin-save-app-password-btn"
-                    className="lime-cta w-full py-2.5 px-4 rounded-xl text-xs og-bold flex items-center justify-center gap-1.5"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    <span>
-                      {isVerifyingAppPassword
-                        ? 'Verifying with smtp.gmail.com:465...'
-                        : 'Verify & Activate 16-Char App Password'}
-                    </span>
-                  </button>
-                </form>
-              </div>
-            )}
+              <p className="text-xs font-mono text-white og-bold">
+                {party.name} · Code {party.inviteCode}
+              </p>
+              <p className="text-[11px] text-zinc-300">
+                All 5-hour advance warnings, missed-deadline alerts, roommate photo uploads, and manual nudges immediately pop up on screen with sound and OS push notifications.
+              </p>
+            </div>
 
             <div className="p-4 rounded-2xl bg-[#07190a] border border-white/10 space-y-2 text-xs">
               <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Official Sender (From):</span>
-                <strong className="text-[#d0ff45] font-mono">{OFFICIAL_BINDROP_EMAIL}</strong>
+                <span className="text-zinc-400">Delivery Channel:</span>
+                <strong className="text-[#d0ff45] font-mono">In-App Pop-Up + OS Push</strong>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-zinc-400">Current Turn Member:</span>
                 <strong className="text-white">{activeAssignee.displayName}</strong>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Member Account Email:</span>
+                <span className="text-zinc-400">Member Account:</span>
                 <strong className="text-[#d0ff45] font-mono">{activeAssignee.email}</strong>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Host Alert Email:</span>
+                <span className="text-zinc-400">Host Account:</span>
                 <strong className="text-zinc-200 font-mono">{party.hostEmail}</strong>
               </div>
               <div className="flex items-center justify-between">
@@ -1017,14 +934,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 <strong className="text-zinc-200">
                   {party.warningEmailSentForCurrentTurn
                     ? 'Triggered for Current Turn'
-                    : 'Armed (Auto-sends at <= 5h left)'}
+                    : 'Armed (Auto-pops at <= 5h left)'}
                 </strong>
               </div>
             </div>
 
             <div className="space-y-2.5">
               <span className="text-xs og-medium text-white block">
-                Send Direct Real Email Notification Now
+                Send Instant Pop-Up Notification Now
               </span>
               <button
                 type="button"
@@ -1032,8 +949,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 data-testid="send-5h-warning-email-btn"
                 className="lime-cta w-full py-3 px-4 rounded-full og-bold text-xs flex items-center justify-center gap-2"
               >
-                <Mail className="w-4 h-4" />
-                <span>Send 5-Hour Warning Mail to {activeAssignee.email}</span>
+                <Send className="w-4 h-4" />
+                <span>Send 5-Hour Warning Pop-Up to {activeAssignee.displayName}</span>
               </button>
 
               <button
@@ -1043,7 +960,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 className="w-full py-3 px-4 rounded-full bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 og-bold text-xs flex items-center justify-center gap-2 transition-colors"
               >
                 <AlertTriangle className="w-4 h-4" />
-                <span>Send Missed-Trash Email to {activeAssignee.email}</span>
+                <span>Send Overdue Pop-Up Alert to {activeAssignee.displayName}</span>
               </button>
             </div>
 
@@ -1086,7 +1003,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   data-testid="trigger-5h-warning-window-btn"
                   className="py-2.5 px-3 rounded-2xl bg-[#091c0b] hover:bg-[#112914] border border-[#d0ff45]/30 text-xs text-[#d0ff45] og-medium"
                 >
-                  Set 4h 30m (&lt;5h Auto-Mail)
+                  Set 4h 30m (&lt;5h Pop-Up)
                 </button>
                 <button
                   type="button"
@@ -1100,28 +1017,28 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </div>
           </div>
 
-          {/* Right 7 Cols: Dispatched Email Outbox Audit */}
+          {/* Right 7 Cols: Dispatched Pop-Up Notification History Log */}
           <div className="lg:col-span-7 glass-panel rounded-[32px] p-6 sm:p-8 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-lg og-bold text-white">
-                  Dispatched Email Outbox Log
+                  Dispatched Pop-Up Notification Log
                 </h2>
                 <p className="text-xs og-light text-zinc-400">
-                  Real-time log of all 5-hour warnings, missed-deadline reminders, and host alerts from {OFFICIAL_BINDROP_EMAIL}
+                  Real-time log of all 5-hour warnings, missed-deadline alerts, and roommate nudges
                 </p>
               </div>
               <span className="text-xs font-mono text-[#d0ff45] tabular-nums">
-                {emailLogs.length} logged
+                {emailLogs.length} delivered
               </span>
             </div>
 
             {emailLogs.length === 0 ? (
               <div className="p-8 rounded-3xl bg-[#07190a] border border-white/[0.07] text-center space-y-2">
-                <Mail className="w-7 h-7 text-[#d0ff45] mx-auto" />
-                <p className="text-sm og-bold text-white">No Emails Dispatched Yet</p>
+                <Send className="w-7 h-7 text-[#d0ff45] mx-auto" />
+                <p className="text-sm og-bold text-white">No Pop-Up Notifications Dispatched Yet</p>
                 <p className="text-xs og-light text-zinc-400 max-w-md mx-auto">
-                  When a roommate&apos;s turn reaches 5 hours before the deadline or expires, or when you click Send Email on the left, the message is sent and logged here.
+                  When a roommate&apos;s turn reaches 5 hours before the deadline or expires, or when you trigger a pop-up alert on the left, it pops up immediately and is logged here.
                 </p>
               </div>
             ) : (
@@ -1131,7 +1048,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               >
                 {emailLogs.map((mail) => {
                   const dt = formatDateTimeReadable(mail.sentAt);
-                  const isDelivered = mail.deliveryStatus === 'SENT_VIA_SMTP';
 
                   return (
                     <div
@@ -1149,15 +1065,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           >
                             {mail.type}
                           </span>
-                          {isDelivered ? (
-                            <span className="px-2.5 py-0.5 rounded-full font-mono text-[10px] bg-emerald-500/20 text-emerald-300">
-                              DELIVERED VIA GMAIL SMTP (IN SENT FOLDER)
-                            </span>
-                          ) : (
-                            <span className="px-2.5 py-0.5 rounded-full font-mono text-[10px] bg-amber-500/20 text-amber-300">
-                              BLOCKED BY GOOGLE SMTP 535-5.7.8 (NEEDS 16-CHAR APP PASSWORD)
-                            </span>
-                          )}
+                          <span className="px-2.5 py-0.5 rounded-full font-mono text-[10px] bg-emerald-500/20 text-emerald-300">
+                            POP-UP &amp; PUSH DELIVERED
+                          </span>
                         </div>
                         <span className="font-mono text-zinc-400 text-[11px]">
                           {dt.datePart} at {dt.timePart}
@@ -1166,25 +1076,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
                       <div className="text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
                         <div>
-                          <span className="text-zinc-400">From: </span>
-                          <span className="font-mono text-zinc-200">
-                            {mail.fromEmail || OFFICIAL_BINDROP_EMAIL}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-400">To: </span>
+                          <span className="text-zinc-400">Recipient: </span>
                           <strong className="text-white">{mail.toName}</strong>{' '}
                           <span className="font-mono text-[#d0ff45]">&lt;{mail.toEmail}&gt;</span>
                         </div>
                       </div>
 
                       <div className="text-xs og-bold text-white">{mail.subject}</div>
-
-                      {!isDelivered && mail.transportInfo && (
-                        <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-500/30 text-[11px] text-amber-200">
-                          {mail.transportInfo}
-                        </div>
-                      )}
 
                       <pre className="p-3 rounded-xl bg-black/40 border border-white/[0.05] text-[11px] text-zinc-300 whitespace-pre-wrap font-sans leading-relaxed">
                         {mail.bodyText}
@@ -1198,28 +1096,28 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       )}
 
-      {/* Mandatory User Confirmation Modal before Sending Real Email via Gmail */}
+      {/* Confirmation Modal before Sending Instant Pop-Up Notification */}
       {emailDraft && (
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="Confirm Email Dispatch"
+          aria-label="Confirm Pop-Up Notification"
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4"
         >
           <div className="w-full max-w-lg glass-panel-elevated rounded-[32px] p-6 sm:p-7 space-y-4 animate-modal-enter max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-[11px] og-bold text-[#d0ff45] uppercase tracking-wider block">
-                  Official Outbound Mailer · {OFFICIAL_BINDROP_EMAIL}
+                  Live Social Pop-Up &amp; Browser Push · {party.name}
                 </span>
                 <h3 className="text-lg og-bold text-white">
-                  Send Email to {emailDraft.recipientName}
+                  Send Pop-Up Notification to {emailDraft.recipientName}
                 </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setEmailDraft(null)}
-                aria-label="Cancel email send"
+                aria-label="Cancel notification send"
                 className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white"
               >
                 <X className="w-4 h-4" />
@@ -1229,57 +1127,27 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             <div className="space-y-3 text-xs">
               <div className="p-3.5 rounded-2xl bg-[#07190a] border border-white/10 space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-zinc-400">Official Sender (From):</span>
+                  <span className="text-zinc-400">Household Party:</span>
                   <strong className="font-mono text-[#d0ff45]">
-                    {OFFICIAL_BINDROP_NAME} &lt;{OFFICIAL_BINDROP_EMAIL}&gt;
+                    {party.name} ({party.inviteCode})
                   </strong>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-zinc-400">Recipient (To):</span>
+                  <span className="text-zinc-400">Recipient:</span>
                   <strong className="font-mono text-white">
                     {emailDraft.recipientName} &lt;{emailDraft.recipientEmail}&gt;
                   </strong>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-zinc-400">Gmail SMTP Status:</span>
-                  <strong
-                    className={`font-mono ${
-                      mailerStatus?.smtpVerified ? 'text-[#d0ff45]' : 'text-amber-300'
-                    }`}
-                  >
-                    {mailerStatus?.smtpVerified
-                      ? 'Verified (16-Char App Password Active)'
-                      : 'Needs 16-Char Google App Password'}
+                  <span className="text-zinc-400">Delivery Mode:</span>
+                  <strong className="font-mono text-[#d0ff45]">
+                    Instant Social Pop-Up Banner + OS Push
                   </strong>
                 </div>
               </div>
 
-              {!mailerStatus?.smtpVerified && (
-                <div className="p-3.5 rounded-2xl bg-amber-950/45 border border-amber-400/45 space-y-2">
-                  <p className="text-[11px] text-amber-200 leading-relaxed">
-                    <strong>Why Gmail blocked &ldquo;EzKen_2005&rdquo;:</strong> Google SMTP (<code className="font-mono">smtp.gmail.com</code>) requires a 16-character App Password from{' '}
-                    <a
-                      href="https://myaccount.google.com/apppasswords"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[#d0ff45] underline og-bold"
-                    >
-                      myaccount.google.com/apppasswords
-                    </a>{' '}
-                    for <code className="font-mono text-white">{OFFICIAL_BINDROP_EMAIL}</code>. Paste it here once to activate real delivery:
-                  </p>
-                  <input
-                    type="text"
-                    value={appPasswordInput}
-                    onChange={(e) => setAppPasswordInput(e.target.value)}
-                    placeholder="Paste 16-char Google App Password (abcd efgh ijkl mnop)"
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#041206] border border-amber-400/40 text-xs text-white font-mono placeholder:text-zinc-500"
-                  />
-                </div>
-              )}
-
               <div className="space-y-1">
-                <label className="block text-xs og-medium text-white">Subject Line</label>
+                <label className="block text-xs og-medium text-white">Pop-Up Headline</label>
                 <input
                   type="text"
                   value={emailDraft.subject}
@@ -1293,9 +1161,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               </div>
 
               <div className="space-y-1">
-                <label className="block text-xs og-medium text-white">Email Message Body</label>
+                <label className="block text-xs og-medium text-white">Notification Message</label>
                 <textarea
-                  rows={5}
+                  rows={4}
                   value={emailDraft.bodyText}
                   onChange={(e) =>
                     setEmailDraft((prev) =>
@@ -1326,8 +1194,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 <Send className="w-3.5 h-3.5" />
                 <span>
                   {isSendingEmail
-                    ? `Sending from ${OFFICIAL_BINDROP_EMAIL}...`
-                    : `Send from ${OFFICIAL_BINDROP_EMAIL}`}
+                    ? 'Sending Pop-Up Notification...'
+                    : `Send Pop-Up to ${emailDraft.recipientName}`}
                 </span>
               </button>
             </div>

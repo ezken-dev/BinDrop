@@ -181,8 +181,9 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
   const handleJoinPartySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
-    if (inviteCodeInput.trim().length < 4) {
-      setErrorMsg('Please enter a valid household invite code.');
+    const cleaned = inviteCodeInput.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+    if (cleaned.length < 4) {
+      setErrorMsg('Please enter a valid 6-character household invite code (e.g. BIN-7X4).');
       return;
     }
     setIsSubmitting(true);
@@ -196,7 +197,7 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
   };
 
   const cleanJoinChars = inviteCodeInput
-    .replace(/[^A-Z0-9]/g, '')
+    .replace(/[^A-Z0-9]/gi, '')
     .toUpperCase()
     .slice(0, 6);
   const sixSlots = Array.from({ length: 6 }, (_, i) => cleanJoinChars[i] || '');
@@ -226,12 +227,11 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
             <h1 className="text-2xl sm:text-3xl og-bold text-white tracking-tight">
               {onboardingMode === 'create'
                 ? 'Create Household Party'
-                : 'Enter Invite Code'}
+                : 'Enter 6-Char Invite Code'}
             </h1>
             <p className="text-xs og-light text-zinc-400 leading-relaxed">
               Signed in as <strong className="og-medium text-zinc-200">{currentAccount.email}</strong>.
-              Automated 5-hour warnings and missed trash reminders are sent from{' '}
-              <strong className="font-mono text-[#d0ff45]">{OFFICIAL_BINDROP_EMAIL}</strong>.
+              Your household party stays synced across PC &amp; mobile with live pop-up notifications.
             </p>
           </div>
 
@@ -363,7 +363,7 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                       Due in {opt.days === 1 ? '1 Day (24h)' : `${opt.days} Days (${opt.hours}h)`}
                     </option>
                   ))}
-                  <option value={4.5}>Due in 4h 30m (Triggers 5h Warning Email)</option>
+                  <option value={4.5}>Due in 4h 30m (Triggers 5h Warning Pop-Up)</option>
                 </select>
               </div>
 
@@ -385,19 +385,28 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
             </form>
           ) : (
             <form onSubmit={handleJoinPartySubmit} className="space-y-5">
-              {/* 6-Digit/Character Visual Slots */}
-              <div className="flex items-center justify-center gap-2 sm:gap-2.5 py-1">
+              {/* 6-Digit/Character Visual Slots (3 chars + hyphen + 3 chars) */}
+              <div
+                onClick={() => document.getElementById('onboard-invite-code')?.focus()}
+                className="flex items-center justify-center gap-1.5 sm:gap-2 py-1 cursor-text"
+              >
                 {sixSlots.map((char, idx) => (
-                  <div
-                    key={idx}
-                    className={`w-11 h-13 rounded-2xl border flex items-center justify-center text-lg og-bold font-mono transition-colors ${
-                      char
-                        ? 'bg-[#122a15] border-[#d0ff45]/60 text-[#d0ff45]'
-                        : 'bg-[#091c0b] border-white/10 text-zinc-600'
-                    }`}
-                  >
-                    {char || '·'}
-                  </div>
+                  <React.Fragment key={idx}>
+                    {idx === 3 && (
+                      <span className="text-zinc-500 font-mono og-bold text-lg select-none">
+                        -
+                      </span>
+                    )}
+                    <div
+                      className={`w-11 h-13 rounded-2xl border flex items-center justify-center text-lg og-bold font-mono transition-colors ${
+                        char
+                          ? 'bg-[#122a15] border-[#d0ff45]/60 text-[#d0ff45]'
+                          : 'bg-[#091c0b] border-white/10 text-zinc-600'
+                      }`}
+                    >
+                      {char || '·'}
+                    </div>
+                  </React.Fragment>
                 ))}
               </div>
 
@@ -406,16 +415,30 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                   htmlFor="onboard-invite-code"
                   className="block text-xs og-medium text-white pl-1"
                 >
-                  Household Invite Code
+                  6-Character Household Invite Code
                 </label>
                 <input
                   id="onboard-invite-code"
                   type="text"
+                  maxLength={8}
                   value={inviteCodeInput}
-                  onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())}
-                  placeholder="e.g. APT-4B9"
+                  onChange={(e) => {
+                    const cleaned = e.target.value
+                      .toUpperCase()
+                      .replace(/[^A-Z0-9]/g, '')
+                      .slice(0, 6);
+                    const formatted =
+                      cleaned.length > 3
+                        ? `${cleaned.slice(0, 3)}-${cleaned.slice(3, 6)}`
+                        : cleaned;
+                    setInviteCodeInput(formatted);
+                  }}
+                  placeholder="e.g. BIN-7X4"
                   className="pill-input w-full px-5 py-3.5 rounded-full text-sm font-mono text-center text-white placeholder:text-zinc-500"
                 />
+                <p className="text-[11px] text-zinc-400 text-center">
+                  Enter all 6 characters of your Host&apos;s code (e.g. <span className="text-[#d0ff45] font-mono">BIN-7X4</span>)
+                </p>
               </div>
 
               {errorMsg && (

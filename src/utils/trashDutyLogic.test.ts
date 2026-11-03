@@ -3,11 +3,15 @@ import assert from 'node:assert/strict';
 import {
   buildUpcomingTurnQueue,
   calculateDropPoints,
+  doesInviteCodeMatch,
   encodeGmailRawMessage,
   evaluateDeadlineStatus,
   formatCountdown,
   formatRotationDaysLabel,
+  formatSixCharInviteCode,
   generateInviteCode,
+  leavePartyMember,
+  normalizeInviteCode,
   ROTATION_DAY_OPTIONS,
   rotatePartyTurn,
   updateMemberProfile,
@@ -49,11 +53,15 @@ test('encodeGmailRawMessage builds base64url encoded RFC 2822 message for Gmail 
   assert.equal(decoded.includes('Hi Jordan, your trash turn is due in 5 hours.'), true);
 });
 
-test('generateInviteCode and validateInviteCode handle household invite codes', () => {
+test('generateInviteCode and validateInviteCode handle 6-character household invite codes matching the 6 UI boxes', () => {
   const code = generateInviteCode('APT', 0.42);
-  assert.match(code, /^APT-[A-Z0-9]{4}$/);
+  assert.match(code, /^APT-[A-Z0-9]{3}$/);
+  assert.equal(normalizeInviteCode(code).length, 6);
   assert.equal(validateInviteCode(code), true);
-  assert.equal(validateInviteCode('bin-9k2p'), true);
+  assert.equal(validateInviteCode('bin-9k2'), true);
+  assert.equal(doesInviteCodeMatch(code, code.toLowerCase().replace('-', '')), true);
+  assert.equal(doesInviteCodeMatch('BIN-7X4K', 'BIN-7X4'), true);
+  assert.equal(formatSixCharInviteCode('BIN-7X4K'), 'BIN-7X4');
   assert.equal(validateInviteCode('x'), false);
 });
 
@@ -269,4 +277,26 @@ test('buildUpcomingTurnQueue and updateMemberProfile work cleanly', () => {
   assert.equal(updated.members[0].displayName, 'Alex R. Prime');
   assert.equal(updated.members[0].email, 'alex.prime@gmail.com');
   assert.equal(updated.hostEmail, 'alex.prime@gmail.com');
+
+  // Host leaves party -> transfers Host role to next roommate Maya
+  const hostLeftResult = leavePartyMember(
+    baseParty,
+    'u_1',
+    'alex@bindrop.io',
+    '2026-05-01T16:00:00.000Z'
+  );
+  assert.equal(hostLeftResult.hostTransferred, true);
+  assert.equal(hostLeftResult.updatedParty?.members.length, 1);
+  assert.equal(hostLeftResult.updatedParty?.hostId, 'u_2');
+  assert.equal(hostLeftResult.updatedParty?.hostEmail, 'maya@bindrop.io');
+  assert.equal(hostLeftResult.updatedParty?.members[0].role, 'HOST');
+
+  // Last remaining member leaves -> party is dissolved (null)
+  const lastLeftResult = leavePartyMember(
+    hostLeftResult.updatedParty!,
+    'u_2',
+    'maya@bindrop.io'
+  );
+  assert.equal(lastLeftResult.updatedParty, null);
 });
+
