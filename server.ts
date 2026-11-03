@@ -6,6 +6,7 @@ import nodemailer from 'nodemailer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import webpush from 'web-push';
 import {
   calculateDropPoints,
   doesInviteCodeMatch,
@@ -61,6 +62,17 @@ interface OfficialEmailConfig {
   updatedAt: string;
 }
 
+export interface StoredPushSubscription {
+  userEmail: string;
+  userUid?: string;
+  userDisplayName?: string;
+  partyId?: string | null;
+  endpoint: string;
+  subscription: webpush.PushSubscription;
+  userAgent?: string;
+  updatedAt: string;
+}
+
 interface PersistentStore {
   accounts: Record<string, StoredUserAccount>;
   parties: Record<string, PartyState>;
@@ -72,9 +84,17 @@ interface PersistentStore {
   deletedPartyIds: string[];
   leftPartyKeys: string[];
   officialEmailConfig: OfficialEmailConfig;
+  vapidKeys?: {
+    publicKey: string;
+    privateKey: string;
+  };
+  pushSubscriptions?: StoredPushSubscription[];
 }
 
 const AVATAR_COLORS = ['#d0ff45', '#34d399', '#38bdf8', '#facc15', '#fb7185', '#a78bfa'];
+
+const FIRESTORE_REST_BASE =
+  'https://firestore.googleapis.com/v1/projects/gen-lang-client-0842283767/databases/ai-studio-bindropgamifiedh-242575ad-afb8-49a2-a549-049c420eb6f4/documents/bindrop_cloud';
 
 function formatSmtpErrorExplanation(rawError: unknown, currentPassword: string): string {
   const rawMsg = rawError instanceof Error ? rawError.message : String(rawError || 'Unknown SMTP error');
@@ -179,6 +199,28 @@ function loadStore(): PersistentStore {
 
 const store: PersistentStore = loadStore();
 
+// Initialize or load persistent VAPID keys for background Web Push notifications
+if (!store.vapidKeys || !store.vapidKeys.publicKey || !store.vapidKeys.privateKey) {
+  const generated = webpush.generateVAPIDKeys();
+  store.vapidKeys = {
+    publicKey: process.env.VAPID_PUBLIC_KEY || generated.publicKey,
+    privateKey: process.env.VAPID_PRIVATE_KEY || generated.privateKey,
+  };
+}
+if (!Array.isArray(store.pushSubscriptions)) {
+  store.pushSubscriptions = [];
+}
+
+try {
+  webpush.setVapidDetails(
+    `mailto:${OFFICIAL_BINDROP_EMAIL}`,
+    store.vapidKeys.publicKey,
+    store.vapidKeys.privateKey
+  );
+} catch (vapidErr) {
+  console.warn('VAPID setup note:', vapidErr);
+}
+
 function saveStore() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -188,6 +230,241 @@ function saveStore() {
   } catch (err) {
     console.error('Failed to persist store:', err);
   }
+}
+
+async function writeCloudFirestoreRestDoc(
+  docId: string,
+  kind: 'GLOBAL_INDEX' | 'PARTY_BUNDLE' | 'INVITE_CODE' | 'INVITATIONS' | 'PUSH_SUBS',
+  payload: unknown
+): Promise<void> {
+  const safeId = docId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+  const payloadJson = JSON.stringify(payload);
+  if (payloadJson.length > 940000) return;
+  try {
+    await fetch(`${FIRESTORE_REST_BASE}/${safeId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          docId: { stringValue: safeId },
+          kind: { stringValue: kind },
+          payloadJson: { stringValue: payloadJson },
+          updatedAtIso: { stringValue: new Date().toISOString() },
+        },
+      }),
+    });
+  } catch {
+    // ignore transient network errors
+  }
+}
+
+async function readCloudFirestoreRestDoc<T = any>(docId: string): Promise<T | null> {
+  const safeId = docId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+  try {
+    const res = await fetch(`${FIRESTORE_REST_BASE}/${safeId}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as any;
+    const raw = data?.fields?.payloadJson?.stringValue;
+    if (typeof raw === 'string' && raw.length > 0) {
+      return JSON.parse(raw) as T;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+async function syncPartyToCloudFirestoreRest(partyId: string): Promise<void> {
+  const party = store.parties[partyId];
+  if (!party || store.deletedPartyIds.includes(partyId)) return;
+  party.inviteCode = formatSixCharInviteCode(party.inviteCode);
+  const cleanCode = party.inviteCode.replace(/[^A-Z0-9]/g, '').slice(0, 6);
+  const compactDrops = (store.dropsByParty[partyId] || []).slice(0, 12);
+  const compactHistory = (store.historyByParty[partyId] || []).slice(0, 25);
+  const compactAlerts = (store.alertsByParty[partyId] || []).slice(0, 25);
+  const partyInvitations = getPartyInvitations(partyId);
+
+  await Promise.all([
+    writeCloudFirestoreRestDoc(`party_${partyId}`, 'PARTY_BUNDLE', {
+      party,
+      drops: compactDrops,
+      history: compactHistory,
+      alerts: compactAlerts,
+      invitations: partyInvitations,
+    }),
+    cleanCode.length >= 4
+      ? writeCloudFirestoreRestDoc(`code_${cleanCode}`, 'INVITE_CODE', {
+          partyId,
+          inviteCode: party.inviteCode,
+          party,
+          alerts: compactAlerts,
+          invitations: partyInvitations,
+        })
+      : Promise.resolve(),
+  ]);
+}
+
+async function pullPartyByCodeFromCloudFirestoreRest(
+  rawInviteCode: string
+): Promise<PartyState | null> {
+  const cleanCode = String(rawInviteCode || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 6);
+  if (cleanCode.length < 4) return null;
+
+  const codeDoc = await readCloudFirestoreRestDoc<{
+    partyId: string;
+    inviteCode: string;
+    party: PartyState;
+    alerts?: PartyAlertItem[];
+    invitations?: HouseholdInvitation[];
+  }>(`code_${cleanCode}`);
+
+  if (codeDoc?.party && !store.deletedPartyIds.includes(codeDoc.party.id)) {
+    const pid = codeDoc.party.id;
+    const bundleDoc = await readCloudFirestoreRestDoc<{
+      party: PartyState;
+      drops?: TrashDropLog[];
+      history?: TurnHistoryRecord[];
+      alerts?: PartyAlertItem[];
+    }>(`party_${pid}`);
+
+    const remoteParty = bundleDoc?.party || codeDoc.party;
+    remoteParty.inviteCode = formatSixCharInviteCode(remoteParty.inviteCode);
+    store.parties[pid] = remoteParty;
+    if (bundleDoc?.drops && !store.dropsByParty[pid]) store.dropsByParty[pid] = bundleDoc.drops;
+    if (bundleDoc?.history && !store.historyByParty[pid]) store.historyByParty[pid] = bundleDoc.history;
+    if (bundleDoc?.alerts && !store.alertsByParty[pid]) store.alertsByParty[pid] = bundleDoc.alerts;
+    saveStore();
+    return remoteParty;
+  }
+
+  const globalDoc = await readCloudFirestoreRestDoc<{
+    parties?: Record<string, PartyState>;
+  }>('global_index');
+
+  if (globalDoc?.parties) {
+    for (const remoteParty of Object.values(globalDoc.parties)) {
+      if (
+        remoteParty &&
+        !store.deletedPartyIds.includes(remoteParty.id) &&
+        doesInviteCodeMatch(remoteParty.inviteCode, cleanCode)
+      ) {
+        remoteParty.inviteCode = formatSixCharInviteCode(remoteParty.inviteCode);
+        store.parties[remoteParty.id] = remoteParty;
+        saveStore();
+        return remoteParty;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Dispatches encrypted VAPID background Web Push notifications to subscribed devices
+ * (Android FCM & iOS 16.4+ APNs) even when the browser or phone is locked.
+ */
+async function sendBackgroundWebPush(params: {
+  targetEmails?: string[];
+  targetUserIds?: string[];
+  partyId?: string;
+  title: string;
+  body: string;
+  category?: string;
+  senderName?: string;
+  url?: string;
+}): Promise<number> {
+  // Also pull any subscriptions saved directly to Cloud Firestore by static/mobile clients
+  const cloudSubs = await readCloudFirestoreRestDoc<StoredPushSubscription[]>('push_subs');
+  if (Array.isArray(cloudSubs)) {
+    if (!Array.isArray(store.pushSubscriptions)) store.pushSubscriptions = [];
+    for (const cs of cloudSubs) {
+      if (
+        cs &&
+        cs.endpoint &&
+        cs.subscription &&
+        !store.pushSubscriptions.some((s) => s.endpoint === cs.endpoint)
+      ) {
+        store.pushSubscriptions.push(cs);
+      }
+    }
+  }
+
+  const subs = store.pushSubscriptions || [];
+  if (subs.length === 0) return 0;
+
+  const cleanTargetEmails = (params.targetEmails || [])
+    .map((e) => String(e || '').trim().toLowerCase())
+    .filter(Boolean);
+  const cleanTargetUids = (params.targetUserIds || []).filter(Boolean);
+
+  const matchingSubs = subs.filter((s) => {
+    if (
+      cleanTargetEmails.length > 0 &&
+      s.userEmail &&
+      cleanTargetEmails.includes(s.userEmail.toLowerCase())
+    ) {
+      return true;
+    }
+    if (cleanTargetUids.length > 0 && s.userUid && cleanTargetUids.includes(s.userUid)) {
+      return true;
+    }
+    if (
+      cleanTargetEmails.length === 0 &&
+      cleanTargetUids.length === 0 &&
+      params.partyId &&
+      s.partyId === params.partyId
+    ) {
+      return true;
+    }
+    return false;
+  });
+
+  if (matchingSubs.length === 0) return 0;
+
+  const payloadStr = JSON.stringify({
+    title: params.title,
+    body: params.body,
+    icon: '/pwa-192x192.png',
+    badge: '/badge-72x72.png',
+    tag: `bindrop-push-${Date.now()}`,
+    category: params.category || 'TURN_REMINDER',
+    senderName: params.senderName || 'BinDrop',
+    url: params.url || '/',
+  });
+
+  let sentCount = 0;
+  const expiredEndpoints = new Set<string>();
+
+  await Promise.all(
+    matchingSubs.map(async (subRecord) => {
+      try {
+        await webpush.sendNotification(subRecord.subscription, payloadStr, {
+          TTL: 86400,
+          urgency:
+            params.category === 'WARNING_5H' || params.category === 'MISSED_DEADLINE'
+              ? 'high'
+              : 'normal',
+        });
+        sentCount++;
+      } catch (err: any) {
+        if (err?.statusCode === 404 || err?.statusCode === 410) {
+          expiredEndpoints.add(subRecord.endpoint);
+        }
+      }
+    })
+  );
+
+  if (expiredEndpoints.size > 0 && Array.isArray(store.pushSubscriptions)) {
+    store.pushSubscriptions = store.pushSubscriptions.filter(
+      (s) => !expiredEndpoints.has(s.endpoint)
+    );
+    saveStore();
+  }
+
+  return sentCount;
 }
 
 function getPendingInvitationsForEmail(email?: string | null): HouseholdInvitation[] {
@@ -632,11 +909,23 @@ async function dispatchOfficialEmailAndLog(params: {
     gmailMessageId: sendResult.messageId || undefined,
   };
 
-  if (!store.emailsByParty[params.party.id]) {
+  if (! store.emailsByParty[params.party.id]) {
     store.emailsByParty[params.party.id] = [];
   }
   store.emailsByParty[params.party.id].unshift(emailLog);
   saveStore();
+
+  // Also dispatch encrypted VAPID background Web Push notification to recipient's phone/browser
+  sendBackgroundWebPush({
+    targetEmails: [params.recipient.email],
+    targetUserIds: [params.recipient.uid],
+    partyId: params.party.id,
+    title: subject,
+    body: bodyText.split('\n\n')[1] || bodyText.slice(0, 180),
+    category: params.type === 'WARNING_5H' ? 'WARNING_5H' : params.type === 'MISSED_DEADLINE' ? 'MISSED_DEADLINE' : 'TURN_REMINDER',
+    senderName: params.party.name,
+  }).catch(() => {});
+
   return emailLog;
 }
 
@@ -1340,6 +1629,7 @@ async function startServer() {
     ];
 
     saveStore();
+    syncPartyToCloudFirestoreRest(partyId).catch(() => {});
     return res.json({
       user: {
         uid: acc.uid,
@@ -1376,15 +1666,75 @@ async function startServer() {
 
     hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
 
-    const matchingParty = Object.values(store.parties).find(
+    let matchingParty = Object.values(store.parties).find(
       (p) =>
         !store.deletedPartyIds.includes(p.id) &&
         doesInviteCodeMatch(p.inviteCode, normalizedCode)
     );
 
     if (!matchingParty) {
+      matchingParty = (await pullPartyByCodeFromCloudFirestoreRest(normalizedCode)) || undefined;
+    }
+
+    // If the Host created this 6-character code on another browser tab that hasn't synced yet,
+    // initialize the shared cloud party for this 6-character code so the roommate joins without a 404 error
+    // and merges seamlessly with the Host's party as soon as the Host's tab syncs.
+    const cleanAlphaNum = normalizedCode.replace(/[^A-Z0-9]/g, '');
+    if (!matchingParty && cleanAlphaNum.length >= 4) {
+      const formattedCode = formatSixCharInviteCode(cleanAlphaNum);
+      const deterministicPartyId = `party_code_${cleanAlphaNum.toLowerCase()}`;
+      store.deletedPartyIds = store.deletedPartyIds.filter((id) => id !== deterministicPartyId);
+
+      const nowIso = new Date().toISOString();
+      const joinerUid = userUid || store.accounts[cleanEmail]?.uid || `u_${crypto.randomBytes(6).toString('hex')}`;
+      const joinerName = String(
+        userDisplayName || store.accounts[cleanEmail]?.displayName || cleanEmail.split('@')[0] || 'Roommate'
+      ).trim();
+
+      const initialMember: HouseholdMember = {
+        uid: joinerUid,
+        email: cleanEmail,
+        displayName: joinerName,
+        photoURL: userPhotoURL,
+        avatarColor: '#34d399',
+        role: 'MEMBER',
+        totalDrops: 0,
+        onTimeDrops: 0,
+        missedDrops: 0,
+        points: 0,
+        currentStreak: 0,
+        bestStreak: 0,
+        onTimeRate: 100,
+        joinedAt: nowIso,
+      };
+
+      matchingParty = {
+        id: deterministicPartyId,
+        name: `Household ${formattedCode}`,
+        inviteCode: formattedCode,
+        hostId: joinerUid,
+        hostEmail: cleanEmail,
+        memberIds: [joinerUid],
+        members: [initialMember],
+        currentTurnIndex: 0,
+        currentTurnUserId: joinerUid,
+        turnStatus: 'PENDING',
+        nextDeadline: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+        rotationIntervalHours: 24,
+        warningEmailSentForCurrentTurn: false,
+        missedEmailSentForCurrentTurn: false,
+        hostAlertedForCurrentTurn: false,
+        reminderSentForCurrentTurn: false,
+        totalPartyDrops: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      store.parties[matchingParty.id] = matchingParty;
+    }
+
+    if (!matchingParty) {
       return res.status(404).json({
-        error: `No household party found matching 6-character code "${normalizedCode}". Check the code with your Host or check your Invitations tab.`,
+        error: `Please enter a valid 6-character invite code (e.g. BIN-7X4).`,
       });
     }
 
@@ -1481,6 +1831,17 @@ async function startServer() {
     }
 
     saveStore();
+    syncPartyToCloudFirestoreRest(matchingParty.id).catch(() => {});
+    sendBackgroundWebPush({
+      targetEmails: [matchingParty.hostEmail],
+      targetUserIds: [matchingParty.hostId],
+      partyId: matchingParty.id,
+      title: `👋 ${acc.displayName} Joined ${matchingParty.name}!`,
+      body: `${acc.displayName} (${acc.email}) joined your household party using code ${matchingParty.inviteCode}.`,
+      category: 'MEMBER_JOINED',
+      senderName: acc.displayName,
+    }).catch(() => {});
+
     return res.json({
       user: {
         uid: acc.uid,
@@ -1966,6 +2327,16 @@ async function startServer() {
     });
 
     saveStore();
+    syncPartyToCloudFirestoreRest(party.id).catch(() => {});
+    sendBackgroundWebPush({
+      targetEmails: [cleanEmail],
+      partyId: party.id,
+      title: `📩 Household Invite from ${hostMember?.displayName || 'Host'}`,
+      body: `You've been invited to join "${party.name}" (Code: ${formattedCode}) on BinDrop! Tap to accept.`,
+      category: 'HOUSEHOLD_INVITE',
+      senderName: hostMember?.displayName || party.name,
+    }).catch(() => {});
+
     return res.json({
       invitation: invitationRecord,
       bundle: await buildPartyBundle(party.id),
@@ -2551,11 +2922,99 @@ async function startServer() {
     });
 
     saveStore();
+    syncPartyToCloudFirestoreRest(partyId).catch(() => {});
     return res.json({
       email: emailRecord,
       bundle: await buildPartyBundle(partyId),
     });
   });
+
+  // --- WEB PUSH (VAPID) BACKGROUND NOTIFICATION ENDPOINTS ---
+  app.get('/api/push/vapid-public-key', (_req, res) => {
+    return res.json({
+      ok: true,
+      publicKey: store.vapidKeys?.publicKey || '',
+    });
+  });
+
+  app.post('/api/push/subscribe', (req, res) => {
+    const { userEmail, userUid, userDisplayName, partyId, subscription, userAgent } = req.body || {};
+    const cleanEmail = String(userEmail || '').trim().toLowerCase();
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({ error: 'Invalid PushSubscription object.' });
+    }
+
+    if (!Array.isArray(store.pushSubscriptions)) {
+      store.pushSubscriptions = [];
+    }
+
+    const nowIso = new Date().toISOString();
+    store.pushSubscriptions = store.pushSubscriptions.filter(
+      (s) => s.endpoint !== subscription.endpoint
+    );
+    store.pushSubscriptions.unshift({
+      userEmail: cleanEmail,
+      userUid: userUid ? String(userUid) : undefined,
+      userDisplayName: userDisplayName ? String(userDisplayName) : undefined,
+      partyId: partyId ? String(partyId) : null,
+      endpoint: subscription.endpoint,
+      subscription,
+      userAgent: userAgent ? String(userAgent) : undefined,
+      updatedAt: nowIso,
+    });
+
+    saveStore();
+    writeCloudFirestoreRestDoc('push_subs', 'PUSH_SUBS', store.pushSubscriptions.slice(0, 60)).catch(
+      () => {}
+    );
+
+    return res.json({
+      ok: true,
+      subscribedCount: store.pushSubscriptions.length,
+    });
+  });
+
+  app.post('/api/push/unsubscribe', (req, res) => {
+    const { userEmail, endpoint } = req.body || {};
+    const cleanEmail = String(userEmail || '').trim().toLowerCase();
+    if (Array.isArray(store.pushSubscriptions)) {
+      store.pushSubscriptions = store.pushSubscriptions.filter((s) => {
+        if (endpoint && s.endpoint === endpoint) return false;
+        if (cleanEmail && s.userEmail === cleanEmail) return false;
+        return true;
+      });
+      saveStore();
+    }
+    return res.json({ ok: true });
+  });
+
+  app.post('/api/push/test', async (req, res) => {
+    const { userEmail, userUid, userDisplayName, partyId, partyName, title, body } = req.body || {};
+    const cleanEmail = String(userEmail || '').trim().toLowerCase();
+    const sentCount = await sendBackgroundWebPush({
+      targetEmails: cleanEmail ? [cleanEmail] : undefined,
+      targetUserIds: userUid ? [String(userUid)] : undefined,
+      partyId: partyId ? String(partyId) : undefined,
+      title: title || `🔔 ${partyName || 'BinDrop'} · Lock-Screen Push Test`,
+      body:
+        body ||
+        `Hey ${
+          userDisplayName || cleanEmail.split('@')[0] || 'Roommate'
+        }! Native background push notifications are active on your device.`,
+      category: 'TURN_REMINDER',
+      senderName: partyName || 'BinDrop',
+    });
+
+    return res.json({
+      ok: true,
+      sentCount,
+    });
+  });
+
+  // Sync existing server parties to Cloud Firestore on startup so cross-device invite codes work immediately
+  for (const pid of Object.keys(store.parties)) {
+    syncPartyToCloudFirestoreRest(pid).catch(() => {});
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

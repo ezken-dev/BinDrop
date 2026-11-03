@@ -328,5 +328,27 @@ service cloud.firestore {
           && (request.auth.uid == existing().targetUserId || isAdmin());
       }
     }
+
+    // Shared Cross-Device Cloud Sync Store (Parties, 6-Char Invite Codes, Invitations & Web Push Subscriptions)
+    function isValidBindropCloudDoc(data, docId) {
+      return isValidId(docId)
+        && data.keys().hasAll(['docId', 'kind', 'payloadJson', 'updatedAtIso'])
+        && data.keys().hasOnly(['docId', 'kind', 'payloadJson', 'updatedAtIso'])
+        && data.docId == docId
+        && data.kind in ['GLOBAL_INDEX', 'PARTY_BUNDLE', 'INVITE_CODE', 'INVITATIONS', 'PUSH_SUBS']
+        && data.payloadJson is string
+        && data.payloadJson.size() >= 2
+        && data.payloadJson.size() <= 950000
+        && data.updatedAtIso is string
+        && data.updatedAtIso.size() >= 10
+        && data.updatedAtIso.size() <= 64;
+    }
+
+    match /bindrop_cloud/{docId} {
+      allow get, list: if true;
+      allow create, update: if isValidBindropCloudDoc(incoming(), docId);
+      allow delete: if isValidId(docId);
+    }
   }
 }
+

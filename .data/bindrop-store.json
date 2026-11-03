@@ -1,0 +1,446 @@
+{
+  "accounts": {
+    "rabsraphel@gmail.com": {
+      "uid": "u9ppgOiex0gYHyw2kgmU8W0e3Xv2",
+      "email": "rabsraphel@gmail.com",
+      "displayName": "peaceRifat",
+      "passwordHash": "4a9c1bb0746af81e5003ea50fb2e30b6132b01f2e75a55374db0c55d7f5c5dc4",
+      "photoURL": "https://lh3.googleusercontent.com/a/ACg8ocKSjd0bPbQoU5OtObDNmz6TrnB4_MCfSDDGJvdPrB_BoC9Z6k_IkQ=s96-c",
+      "avatarColor": "#d0ff45",
+      "createdAt": "2026-11-03T00:46:03.645Z",
+      "updatedAt": "2026-11-03T03:21:34.148Z"
+    },
+    "peacerifat2005@gmail.com": {
+      "uid": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+      "email": "peacerifat2005@gmail.com",
+      "displayName": "Rifat Ashhab",
+      "passwordHash": "152ee5d75621a69bffe3056438a32b20efe34a11f18fad01e9bbb434a14eb001",
+      "photoURL": "https://lh3.googleusercontent.com/a/ACg8ocKzwyED_vfPa-gGu1QfAdHP-Oao10QBLvh_Kf9OS0eeORNWCko=s96-c",
+      "avatarColor": "#34d399",
+      "createdAt": "2026-11-03T03:25:41.991Z",
+      "updatedAt": "2026-11-03T05:03:02.660Z",
+      "partyId": "party_2da845a148"
+    },
+    "vlken@gmail.com": {
+      "uid": "u_vlken",
+      "email": "vlken@gmail.com",
+      "displayName": "VLken",
+      "passwordHash": "540faf68e0e0b76a2c4f4711126c6449ce2809562656ec08b99785e6d70afd5a",
+      "avatarColor": "#34d399",
+      "partyId": "party_ezken_frvr",
+      "createdAt": "2026-10-03T09:06:01.189Z",
+      "updatedAt": "2026-11-03T04:38:50.102Z"
+    },
+    "milnmxiter@gmail.com": {
+      "uid": "u_milnmxiter",
+      "email": "milnmxiter@gmail.com",
+      "displayName": "Milnmxiter",
+      "passwordHash": "540faf68e0e0b76a2c4f4711126c6449ce2809562656ec08b99785e6d70afd5a",
+      "avatarColor": "#a78bfa",
+      "partyId": "party_ezken_frvr",
+      "createdAt": "2026-10-03T09:06:01.189Z",
+      "updatedAt": "2026-11-03T04:38:50.102Z"
+    },
+    "kanics@gmail.com": {
+      "uid": "u_kanics",
+      "email": "kanics@gmail.com",
+      "displayName": "Kanics",
+      "passwordHash": "540faf68e0e0b76a2c4f4711126c6449ce2809562656ec08b99785e6d70afd5a",
+      "avatarColor": "#fb923c",
+      "partyId": "party_ezken_frvr",
+      "createdAt": "2026-10-03T09:06:01.189Z",
+      "updatedAt": "2026-11-03T04:38:50.103Z"
+    },
+    "roommate_test@gmail.com": {
+      "uid": "u_602887df662b",
+      "email": "roommate_test@gmail.com",
+      "displayName": "Alex Roommate",
+      "passwordHash": "c205194ca84834698242f5786d67afd8f161c2fc422f23d4c095c839d00221c7",
+      "avatarColor": "#34d399",
+      "partyId": "party_code_muthjz",
+      "createdAt": "2026-11-03T05:16:54.987Z",
+      "updatedAt": "2026-11-03T05:16:54.987Z"
+    }
+  },
+  "parties": {
+    "party_2da845a148": {
+      "id": "party_2da845a148",
+      "name": "wda",
+      "inviteCode": "WDA-GCD",
+      "hostId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+      "hostEmail": "peacerifat2005@gmail.com",
+      "memberIds": [
+        "oQSMwcQQwyeLPu162quM8vgyqPv1"
+      ],
+      "members": [
+        {
+          "uid": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+          "email": "peacerifat2005@gmail.com",
+          "displayName": "Rifat Ashhab",
+          "photoURL": "https://lh3.googleusercontent.com/a/ACg8ocKzwyED_vfPa-gGu1QfAdHP-Oao10QBLvh_Kf9OS0eeORNWCko=s96-c",
+          "avatarColor": "#d0ff45",
+          "role": "HOST",
+          "totalDrops": 0,
+          "onTimeDrops": 0,
+          "missedDrops": 0,
+          "points": 0,
+          "currentStreak": 0,
+          "bestStreak": 0,
+          "onTimeRate": 100,
+          "joinedAt": "2026-11-03T03:26:23.111Z"
+        }
+      ],
+      "currentTurnIndex": 0,
+      "currentTurnUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+      "turnStatus": "PENDING",
+      "nextDeadline": "2026-11-04T03:26:23.111Z",
+      "rotationIntervalHours": 24,
+      "warningEmailSentForCurrentTurn": true,
+      "missedEmailSentForCurrentTurn": false,
+      "hostAlertedForCurrentTurn": false,
+      "reminderSentForCurrentTurn": true,
+      "totalPartyDrops": 0,
+      "createdAt": "2026-11-03T03:26:23.111Z",
+      "updatedAt": "2026-11-03T04:11:49.724Z"
+    },
+    "party_82d27628f1": {
+      "id": "party_82d27628f1",
+      "name": "EzKen",
+      "inviteCode": "EZK-Y3C",
+      "hostId": "u9ppgOiex0gYHyw2kgmU8W0e3Xv2",
+      "hostEmail": "rabsraphel@gmail.com",
+      "memberIds": [
+        "u9ppgOiex0gYHyw2kgmU8W0e3Xv2"
+      ],
+      "members": [
+        {
+          "uid": "u9ppgOiex0gYHyw2kgmU8W0e3Xv2",
+          "email": "rabsraphel@gmail.com",
+          "displayName": "peaceRifat",
+          "photoURL": "https://lh3.googleusercontent.com/a/ACg8ocKSjd0bPbQoU5OtObDNmz6TrnB4_MCfSDDGJvdPrB_BoC9Z6k_IkQ=s96-c",
+          "avatarColor": "#d0ff45",
+          "role": "HOST",
+          "totalDrops": 0,
+          "onTimeDrops": 0,
+          "missedDrops": 0,
+          "points": 0,
+          "currentStreak": 0,
+          "bestStreak": 0,
+          "onTimeRate": 100,
+          "joinedAt": "2026-11-02T07:29:52.337Z"
+        }
+      ],
+      "currentTurnIndex": 0,
+      "currentTurnUserId": "u9ppgOiex0gYHyw2kgmU8W0e3Xv2",
+      "turnStatus": "PENDING",
+      "nextDeadline": "2026-11-06T07:29:52.337Z",
+      "rotationIntervalHours": 96,
+      "warningEmailSentForCurrentTurn": true,
+      "missedEmailSentForCurrentTurn": false,
+      "hostAlertedForCurrentTurn": false,
+      "reminderSentForCurrentTurn": true,
+      "totalPartyDrops": 0,
+      "createdAt": "2026-11-02T07:29:52.337Z",
+      "updatedAt": "2026-11-02T07:30:08.020Z"
+    },
+    "party_ezken_frvr": {
+      "id": "party_ezken_frvr",
+      "name": "EzKen",
+      "inviteCode": "EZK-FRV",
+      "hostId": "u_peace_rifat",
+      "hostEmail": "peacerifat2005@gmail.com",
+      "memberIds": [
+        "u_peace_rifat",
+        "u_vlken",
+        "u_milnmxiter",
+        "u_kanics"
+      ],
+      "members": [
+        {
+          "uid": "u_peace_rifat",
+          "email": "peacerifat2005@gmail.com",
+          "displayName": "peaceRifat",
+          "photoURL": "data:image/svg+xml;utf8,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20120%20120%22%20width%3D%22120%22%20height%3D%22120%22%3E%0A%20%20%3Cdefs%3E%0A%20%20%20%20%3CradialGradient%20id%3D%22avatarGlow%22%20cx%3D%2250%25%22%20cy%3D%2250%25%22%20r%3D%2250%25%22%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%220%25%22%20stop-color%3D%22%233b1111%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%2250%25%22%20stop-color%3D%22%231c0707%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%22100%25%22%20stop-color%3D%22%23050101%22%2F%3E%0A%20%20%20%20%3C%2FradialGradient%3E%0A%20%20%3C%2Fdefs%3E%0A%20%20%3Crect%20width%3D%22120%22%20height%3D%22120%22%20rx%3D%2260%22%20fill%3D%22url(%23avatarGlow)%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2260%22%20cy%3D%2250%22%20r%3D%2228%22%20fill%3D%22%23e11d48%22%20opacity%3D%220.25%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M60%2022%20C48%2030%2042%2045%2045%2060%20C48%2072%2058%2078%2060%2082%20C62%2078%2072%2072%2075%2060%20C78%2045%2072%2030%2060%2022%20Z%22%20fill%3D%22%23f43f5e%22%20opacity%3D%220.75%22%2F%3E%0A%20%20%3Cpolygon%20points%3D%2252%2C48%2068%2C48%2060%2C68%22%20fill%3D%22%23fb7185%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2260%22%20cy%3D%2245%22%20r%3D%228%22%20fill%3D%22%23ffe4e6%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M25%20110%20C32%2085%2088%2085%2095%20110%22%20fill%3D%22%239f1239%22%20opacity%3D%220.9%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+          "avatarColor": "#d0ff45",
+          "role": "HOST",
+          "totalDrops": 50,
+          "onTimeDrops": 48,
+          "missedDrops": 3,
+          "points": 120,
+          "currentStreak": 0,
+          "bestStreak": 14,
+          "onTimeRate": 91,
+          "joinedAt": "2026-10-01T00:00:00.000Z"
+        },
+        {
+          "uid": "u_vlken",
+          "email": "vlken@gmail.com",
+          "displayName": "VLken",
+          "avatarColor": "#34d399",
+          "role": "MEMBER",
+          "totalDrops": 38,
+          "onTimeDrops": 36,
+          "missedDrops": 2,
+          "points": 90,
+          "currentStreak": 4,
+          "bestStreak": 8,
+          "onTimeRate": 94,
+          "joinedAt": "2026-10-02T00:00:00.000Z"
+        },
+        {
+          "uid": "u_milnmxiter",
+          "email": "milnmxiter@gmail.com",
+          "displayName": "Milnmxiter",
+          "avatarColor": "#a78bfa",
+          "role": "MEMBER",
+          "totalDrops": 35,
+          "onTimeDrops": 33,
+          "missedDrops": 2,
+          "points": 85,
+          "currentStreak": 6,
+          "bestStreak": 9,
+          "onTimeRate": 94,
+          "joinedAt": "2026-10-03T00:00:00.000Z"
+        },
+        {
+          "uid": "u_kanics",
+          "email": "kanics@gmail.com",
+          "displayName": "Kanics",
+          "avatarColor": "#fb923c",
+          "role": "MEMBER",
+          "totalDrops": 30,
+          "onTimeDrops": 28,
+          "missedDrops": 2,
+          "points": 75,
+          "currentStreak": 3,
+          "bestStreak": 7,
+          "onTimeRate": 93,
+          "joinedAt": "2026-10-04T00:00:00.000Z"
+        }
+      ],
+      "currentTurnIndex": 0,
+      "currentTurnUserId": "u_peace_rifat",
+      "turnStatus": "OVERDUE",
+      "nextDeadline": "2026-11-02T23:38:01.189Z",
+      "rotationIntervalHours": 96,
+      "warningEmailSentForCurrentTurn": false,
+      "missedEmailSentForCurrentTurn": true,
+      "hostAlertedForCurrentTurn": true,
+      "reminderSentForCurrentTurn": false,
+      "totalPartyDrops": 50,
+      "createdAt": "2026-10-03T09:06:01.189Z",
+      "updatedAt": "2026-11-03T04:38:54.105Z"
+    },
+    "party_code_muthjz": {
+      "id": "party_code_muthjz",
+      "name": "Household MUT-HJZ",
+      "inviteCode": "MUT-HJZ",
+      "hostId": "u_991c22a0491a",
+      "hostEmail": "roommate_test@gmail.com",
+      "memberIds": [
+        "u_602887df662b"
+      ],
+      "members": [
+        {
+          "uid": "u_602887df662b",
+          "email": "roommate_test@gmail.com",
+          "displayName": "Alex Roommate",
+          "avatarColor": "#34d399",
+          "role": "MEMBER",
+          "totalDrops": 0,
+          "onTimeDrops": 0,
+          "missedDrops": 0,
+          "points": 0,
+          "currentStreak": 0,
+          "bestStreak": 0,
+          "onTimeRate": 100,
+          "joinedAt": "2026-11-03T05:16:54.986Z"
+        }
+      ],
+      "currentTurnIndex": 0,
+      "currentTurnUserId": "u_991c22a0491a",
+      "turnStatus": "PENDING",
+      "nextDeadline": "2026-11-04T05:16:54.987Z",
+      "rotationIntervalHours": 24,
+      "warningEmailSentForCurrentTurn": false,
+      "missedEmailSentForCurrentTurn": false,
+      "hostAlertedForCurrentTurn": false,
+      "reminderSentForCurrentTurn": false,
+      "totalPartyDrops": 0,
+      "createdAt": "2026-11-03T05:16:54.986Z",
+      "updatedAt": "2026-11-03T05:16:54.986Z"
+    }
+  },
+  "dropsByParty": {
+    "party_2da845a148": []
+  },
+  "historyByParty": {
+    "party_2da845a148": [],
+    "party_ezken_frvr": [
+      {
+        "id": "hist_missed_1793680734127",
+        "partyId": "party_ezken_frvr",
+        "userId": "u_peace_rifat",
+        "userEmail": "peacerifat2005@gmail.com",
+        "userDisplayName": "peaceRifat",
+        "userPhotoURL": "data:image/svg+xml;utf8,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20120%20120%22%20width%3D%22120%22%20height%3D%22120%22%3E%0A%20%20%3Cdefs%3E%0A%20%20%20%20%3CradialGradient%20id%3D%22avatarGlow%22%20cx%3D%2250%25%22%20cy%3D%2250%25%22%20r%3D%2250%25%22%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%220%25%22%20stop-color%3D%22%233b1111%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%2250%25%22%20stop-color%3D%22%231c0707%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%22100%25%22%20stop-color%3D%22%23050101%22%2F%3E%0A%20%20%20%20%3C%2FradialGradient%3E%0A%20%20%3C%2Fdefs%3E%0A%20%20%3Crect%20width%3D%22120%22%20height%3D%22120%22%20rx%3D%2260%22%20fill%3D%22url(%23avatarGlow)%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2260%22%20cy%3D%2250%22%20r%3D%2228%22%20fill%3D%22%23e11d48%22%20opacity%3D%220.25%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M60%2022%20C48%2030%2042%2045%2045%2060%20C48%2072%2058%2078%2060%2082%20C62%2078%2072%2072%2075%2060%20C78%2045%2072%2030%2060%2022%20Z%22%20fill%3D%22%23f43f5e%22%20opacity%3D%220.75%22%2F%3E%0A%20%20%3Cpolygon%20points%3D%2252%2C48%2068%2C48%2060%2C68%22%20fill%3D%22%23fb7185%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2260%22%20cy%3D%2245%22%20r%3D%228%22%20fill%3D%22%23ffe4e6%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M25%20110%20C32%2085%2088%2085%2095%20110%22%20fill%3D%22%239f1239%22%20opacity%3D%220.9%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+        "outcome": "MISSED_DEADLINE",
+        "pointsAwarded": 0,
+        "deadlineIso": "2026-11-02T23:38:01.189Z",
+        "recordedIso": "2026-11-03T04:38:54.105Z",
+        "notes": "Missed deadline on time. Instant pop-up notification sent to peaceRifat (peacerifat2005@gmail.com) and Host peaceRifat.",
+        "createdAt": "2026-11-03T04:38:54.105Z"
+      }
+    ]
+  },
+  "emailsByParty": {
+    "party_2da845a148": [
+      {
+        "id": "email_1793679109723_qqdso",
+        "partyId": "party_2da845a148",
+        "recipientUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "fromEmail": "bindropofficial@gmail.com",
+        "toEmail": "peacerifat2005@gmail.com",
+        "toName": "Rifat Ashhab",
+        "subject": "[BinDrop 5-Hour Warning] Rifat Ashhab, less than 5 hours left for your trash turn at wda",
+        "bodyText": "Hi Rifat Ashhab (peacerifat2005@gmail.com),\n\nThis is an automated 5-hour advance warning sent from bindropofficial@gmail.com for \"wda\".\n\nYour scheduled trash disposal deadline is Nov 4, 2026 at 3:26:23 AM (less than 5 hours remaining).\n\nPlease take the household trash out to the outdoor bin/dumpster and upload your photo proof in BinDrop for Host verification before the deadline to earn your on-time streak points and avoid a missed-turn alert to Host peacerifat2005@gmail.com.\n\n— BinDrop Official (bindropofficial@gmail.com)",
+        "type": "WARNING_5H",
+        "sentAt": "2026-11-03T04:11:49.722Z",
+        "deliveryStatus": "PUSH_NOTIFICATION_SENT",
+        "transportInfo": "Delivered via Live Social Pop-Up Banner & Browser Push Notification to Rifat Ashhab (peacerifat2005@gmail.com).",
+        "gmailMessageId": "push_1793679109723"
+      },
+      {
+        "id": "email_1793679097175_d046j",
+        "partyId": "party_2da845a148",
+        "recipientUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "fromEmail": "bindropofficial@gmail.com",
+        "toEmail": "peacerifat2005@gmail.com",
+        "toName": "Rifat Ashhab",
+        "subject": "[BinDrop 5-Hour Warning] Rifat Ashhab, less than 5 hours left for your trash turn at wda",
+        "bodyText": "Hi Rifat Ashhab (peacerifat2005@gmail.com),\n\nThis is an automated 5-hour advance warning sent from bindropofficial@gmail.com for \"wda\".\n\nYour scheduled trash disposal deadline is Nov 4, 2026 at 3:26:23 AM (less than 5 hours remaining).\n\nPlease take the household trash out to the outdoor bin/dumpster and upload your photo proof in BinDrop for Host verification before the deadline to earn your on-time streak points and avoid a missed-turn alert to Host peacerifat2005@gmail.com.\n\n— BinDrop Official (bindropofficial@gmail.com)",
+        "type": "WARNING_5H",
+        "sentAt": "2026-11-03T04:11:37.113Z",
+        "deliveryStatus": "PUSH_NOTIFICATION_SENT",
+        "transportInfo": "Delivered via Live Social Pop-Up Banner & Browser Push Notification to Rifat Ashhab (peacerifat2005@gmail.com).",
+        "gmailMessageId": "push_1793679097175"
+      }
+    ],
+    "party_ezken_frvr": [
+      {
+        "id": "email_1793680734126_34ydc",
+        "partyId": "party_ezken_frvr",
+        "recipientUserId": "u_peace_rifat",
+        "fromEmail": "bindropofficial@gmail.com",
+        "toEmail": "peacerifat2005@gmail.com",
+        "toName": "peaceRifat",
+        "subject": "[Host Alert · EzKen] peaceRifat missed their trash deadline",
+        "bodyText": "Hi peaceRifat (Party Host),\n\nRoommate peaceRifat (peacerifat2005@gmail.com) missed their scheduled trash disposal deadline (Nov 2, 2026 at 11:38:01 PM) for \"EzKen\".\n\nAn overdue reminder email has been sent from bindropofficial@gmail.com directly to peacerifat2005@gmail.com, and this missed deadline has been logged in your Admin History Database.\n\n— BinDrop Official (bindropofficial@gmail.com)",
+        "type": "HOST_ESCALATION",
+        "sentAt": "2026-11-03T04:38:54.126Z",
+        "deliveryStatus": "PUSH_NOTIFICATION_SENT",
+        "transportInfo": "Delivered via Live Social Pop-Up Banner & Browser Push Notification to peaceRifat (peacerifat2005@gmail.com).",
+        "gmailMessageId": "push_1793680734126"
+      },
+      {
+        "id": "email_1793680734126_qx3e6",
+        "partyId": "party_ezken_frvr",
+        "recipientUserId": "u_peace_rifat",
+        "fromEmail": "bindropofficial@gmail.com",
+        "toEmail": "peacerifat2005@gmail.com",
+        "toName": "peaceRifat",
+        "subject": "[URGENT: Missed Trash Deadline] peaceRifat, your trash turn for EzKen is OVERDUE",
+        "bodyText": "Hi peaceRifat (peacerifat2005@gmail.com),\n\nYou missed your scheduled household trash disposal deadline (Nov 2, 2026 at 11:38:01 PM) for \"EzKen\".\n\nYour turn status has been marked OVERDUE in the household history database, and Party Host (peacerifat2005@gmail.com) has been notified.\n\nPlease take the trash out immediately and upload a trash disposal photo in the app so the Host can verify and clear your overdue turn.\n\n— BinDrop Official (bindropofficial@gmail.com)",
+        "type": "MISSED_DEADLINE",
+        "sentAt": "2026-11-03T04:38:54.106Z",
+        "deliveryStatus": "PUSH_NOTIFICATION_SENT",
+        "transportInfo": "Delivered via Live Social Pop-Up Banner & Browser Push Notification to peaceRifat (peacerifat2005@gmail.com).",
+        "gmailMessageId": "push_1793680734126"
+      }
+    ]
+  },
+  "alertsByParty": {
+    "party_2da845a148": [
+      {
+        "id": "alert_push_1793679109724",
+        "partyId": "party_2da845a148",
+        "targetUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "targetDisplayName": "Rifat Ashhab",
+        "targetEmail": "peacerifat2005@gmail.com",
+        "assigneeUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "assigneeDisplayName": "Rifat Ashhab",
+        "senderName": "wda Alert",
+        "senderPhotoURL": "https://lh3.googleusercontent.com/a/ACg8ocKzwyED_vfPa-gGu1QfAdHP-Oao10QBLvh_Kf9OS0eeORNWCko=s96-c",
+        "title": "[BinDrop 5-Hour Warning] Rifat Ashhab, less than 5 hours left for your trash turn at wda",
+        "category": "WARNING_5H",
+        "type": "WARNING_5H",
+        "message": "Hey Rifat Ashhab, you are up for trash duty at wda! Snap & upload your trash disposal photo before the deadline.",
+        "read": false,
+        "createdAt": "2026-11-03T04:11:49.724Z"
+      },
+      {
+        "id": "alert_push_1793679097175",
+        "partyId": "party_2da845a148",
+        "targetUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "targetDisplayName": "Rifat Ashhab",
+        "targetEmail": "peacerifat2005@gmail.com",
+        "assigneeUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "assigneeDisplayName": "Rifat Ashhab",
+        "senderName": "wda Alert",
+        "senderPhotoURL": "https://lh3.googleusercontent.com/a/ACg8ocKzwyED_vfPa-gGu1QfAdHP-Oao10QBLvh_Kf9OS0eeORNWCko=s96-c",
+        "title": "[BinDrop 5-Hour Warning] Rifat Ashhab, less than 5 hours left for your trash turn at wda",
+        "category": "WARNING_5H",
+        "type": "WARNING_5H",
+        "message": "Hey Rifat Ashhab, you are up for trash duty at wda! Snap & upload your trash disposal photo before the deadline.",
+        "read": true,
+        "createdAt": "2026-11-03T04:11:37.175Z"
+      },
+      {
+        "id": "alert_welcome_1793676383111",
+        "partyId": "party_2da845a148",
+        "targetUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "targetDisplayName": "Rifat Ashhab",
+        "targetEmail": "peacerifat2005@gmail.com",
+        "assigneeUserId": "oQSMwcQQwyeLPu162quM8vgyqPv1",
+        "assigneeDisplayName": "Rifat Ashhab",
+        "type": "TURN_REMINDER",
+        "message": "Household \"wda\" launched on a Every 1 Day (24h) schedule! Official auto-emailing active via bindropofficial@gmail.com.",
+        "read": true,
+        "createdAt": "2026-11-03T03:26:23.111Z"
+      }
+    ],
+    "party_ezken_frvr": [
+      {
+        "id": "alert_overdue_1793680734127",
+        "partyId": "party_ezken_frvr",
+        "targetUserId": "u_peace_rifat",
+        "targetDisplayName": "peaceRifat",
+        "targetEmail": "peacerifat2005@gmail.com",
+        "assigneeUserId": "u_peace_rifat",
+        "assigneeDisplayName": "peaceRifat",
+        "senderName": "EzKen · Urgent Alert",
+        "senderPhotoURL": "data:image/svg+xml;utf8,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20120%20120%22%20width%3D%22120%22%20height%3D%22120%22%3E%0A%20%20%3Cdefs%3E%0A%20%20%20%20%3CradialGradient%20id%3D%22avatarGlow%22%20cx%3D%2250%25%22%20cy%3D%2250%25%22%20r%3D%2250%25%22%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%220%25%22%20stop-color%3D%22%233b1111%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%2250%25%22%20stop-color%3D%22%231c0707%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%22100%25%22%20stop-color%3D%22%23050101%22%2F%3E%0A%20%20%20%20%3C%2FradialGradient%3E%0A%20%20%3C%2Fdefs%3E%0A%20%20%3Crect%20width%3D%22120%22%20height%3D%22120%22%20rx%3D%2260%22%20fill%3D%22url(%23avatarGlow)%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2260%22%20cy%3D%2250%22%20r%3D%2228%22%20fill%3D%22%23e11d48%22%20opacity%3D%220.25%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M60%2022%20C48%2030%2042%2045%2045%2060%20C48%2072%2058%2078%2060%2082%20C62%2078%2072%2072%2075%2060%20C78%2045%2072%2030%2060%2022%20Z%22%20fill%3D%22%23f43f5e%22%20opacity%3D%220.75%22%2F%3E%0A%20%20%3Cpolygon%20points%3D%2252%2C48%2068%2C48%2060%2C68%22%20fill%3D%22%23fb7185%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2260%22%20cy%3D%2245%22%20r%3D%228%22%20fill%3D%22%23ffe4e6%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M25%20110%20C32%2085%2088%2085%2095%20110%22%20fill%3D%22%239f1239%22%20opacity%3D%220.9%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+        "title": "Missed Trash Deadline · peaceRifat",
+        "category": "MISSED_DEADLINE",
+        "type": "HOST_ESCALATION",
+        "message": "peaceRifat missed their scheduled trash deadline for EzKen! Upload a late trash photo now to clear the overdue turn.",
+        "read": false,
+        "createdAt": "2026-11-03T04:38:54.105Z"
+      }
+    ]
+  },
+  "invitations": [],
+  "deletedPartyIds": [],
+  "leftPartyKeys": [],
+  "officialEmailConfig": {
+    "email": "bindropofficial@gmail.com",
+    "password": "EzKen_2005",
+    "smtpVerified": true,
+    "updatedAt": "2026-11-03T03:39:25.696Z"
+  },
+  "vapidKeys": {
+    "publicKey": "BMh-ecOIiHEhaC3oKwItomIFurs4to5uDTyGJy2hWrpWq97JrjFqsNFmznihnFHhywHZ4q420XZkKd1ZzE2v12o",
+    "privateKey": "Bl8tLrPR4S_mTIvwA7Rg2y4vOrxUIUchhmGgw2phe_s"
+  },
+  "pushSubscriptions": []
+}

@@ -63,7 +63,12 @@ import {
   type AuthenticatedAccount,
 } from './components/AuthLoginScreen';
 import { MemberAvatar } from './components/MemberAvatar';
+import { PushAlertsCard } from './components/PushAlertsCard';
 import { apiFetch, getInitialCachedBundleForAccount } from './utils/apiClient';
+import {
+  registerBinDropServiceWorker,
+  triggerSystemNotificationViaServiceWorker,
+} from './utils/pushClient';
 
 type ActiveTab = 'hud' | 'admin' | 'party' | 'profile';
 
@@ -119,39 +124,12 @@ function triggerBrowserPushNotification(title: string, body: string, tag?: strin
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
       navigator.vibrate([120, 60, 120]);
     }
-    if (typeof window === 'undefined' || !('Notification' in window)) return;
-    if (Notification.permission === 'granted') {
-      const notifTag = tag || `bindrop_${Date.now()}`;
-      // On Android Chrome, new Notification() throws Illegal constructor and requires ServiceWorkerRegistration.showNotification
-      if ('serviceWorker' in navigator && navigator.serviceWorker) {
-        navigator.serviceWorker
-          .getRegistration()
-          .then((reg) => {
-            if (reg && typeof reg.showNotification === 'function') {
-              reg.showNotification(title, { body, tag: notifTag }).catch(() => {});
-            } else {
-              try {
-                new Notification(title, { body, tag: notifTag });
-              } catch {
-                // ignore mobile browser restriction
-              }
-            }
-          })
-          .catch(() => {
-            try {
-              new Notification(title, { body, tag: notifTag });
-            } catch {
-              // ignore
-            }
-          });
-      } else {
-        try {
-          new Notification(title, { body, tag: notifTag });
-        } catch {
-          // ignore
-        }
-      }
-    }
+    triggerSystemNotificationViaServiceWorker({
+      title,
+      body,
+      tag: tag || `bindrop_${Date.now()}`,
+      category: 'TURN_REMINDER',
+    }).catch(() => {});
   } catch {
     // ignore browser notification errors in restricted iframes or mobile webviews
   }
@@ -354,6 +332,38 @@ export default function App() {
     }, 7500);
     return () => clearTimeout(timer);
   }, [activePopupToast]);
+
+  // Register background Service Worker (/sw.js) and listen for incoming Web Push events
+  useEffect(() => {
+    registerBinDropServiceWorker().catch(() => {});
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'BINDROP_PUSH_RECEIVED' && event.data?.payload) {
+        const p = event.data.payload;
+        setActivePopupToast({
+          id: p.tag || `push_${Date.now()}`,
+          partyId: party?.id || 'party_push',
+          targetUserId: currentAccount?.uid || 'u_self',
+          targetDisplayName: currentAccount?.displayName || 'You',
+          targetEmail: currentAccount?.email || OFFICIAL_BINDROP_EMAIL,
+          assigneeUserId: currentAccount?.uid || 'u_self',
+          assigneeDisplayName: currentAccount?.displayName || 'You',
+          senderName: p.senderName || party?.name || 'BinDrop',
+          title: p.title || 'BinDrop Household Alert',
+          category: p.category || 'TURN_REMINDER',
+          type: 'TURN_REMINDER',
+          message: p.body || 'New household trash duty notification.',
+          read: false,
+          createdAt: new Date().toISOString(),
+        });
+        playSocialNotificationChime();
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+  }, [party?.id, party?.name, currentAccount?.uid, currentAccount?.displayName, currentAccount?.email]);
 
   // Sync with Firebase Firestore when Firebase Auth user is active
   const syncPartyToFirestore = useCallback(
@@ -1441,6 +1451,35 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Native PWA Background Push Subscription & iOS Home Screen Rule Card */}
+              <PushAlertsCard
+                userEmail={currentAccount.email}
+                userUid={currentAccount.uid}
+                userDisplayName={currentAccount.displayName}
+                partyId={party.id}
+                partyName={party.name}
+                onTriggerInAppBanner={(banner) => {
+                  setIsNotifDrawerOpen(false);
+                  showSocialPopupNotification({
+                    id: `push_banner_${Date.now()}`,
+                    partyId: party.id,
+                    targetUserId: currentAccount.uid,
+                    targetDisplayName: currentAccount.displayName,
+                    targetEmail: currentAccount.email,
+                    assigneeUserId: currentAccount.uid,
+                    assigneeDisplayName: currentAccount.displayName,
+                    senderName: banner.senderName,
+                    senderPhotoURL: currentAccount.photoURL,
+                    title: banner.title,
+                    category: 'TURN_REMINDER',
+                    type: 'TURN_REMINDER',
+                    message: banner.message,
+                    read: false,
+                    createdAt: new Date().toISOString(),
+                  });
+                }}
+              />
+
               {/* OS & Mobile Social Pop-Up Notification Test Card */}
               <div className="p-3.5 rounded-2xl bg-[#0b210e] border border-[#d0ff45]/35 flex items-center justify-between gap-3">
                 <div className="space-y-0.5">
@@ -1612,6 +1651,35 @@ export default function App() {
         {/* TAB 1: DUTY HUD */}
         {activeTab === 'hud' && (
           <div className="animate-view-enter space-y-6">
+            {/* Native PWA Lock-Screen Push Toggle & iOS Home Screen Guide on Main Duty HUD */}
+            <PushAlertsCard
+              userEmail={currentAccount.email}
+              userUid={currentAccount.uid}
+              userDisplayName={currentAccount.displayName}
+              partyId={party.id}
+              partyName={party.name}
+              compact
+              onTriggerInAppBanner={(banner) => {
+                showSocialPopupNotification({
+                  id: `hud_push_banner_${Date.now()}`,
+                  partyId: party.id,
+                  targetUserId: currentAccount.uid,
+                  targetDisplayName: currentAccount.displayName,
+                  targetEmail: currentAccount.email,
+                  assigneeUserId: currentAccount.uid,
+                  assigneeDisplayName: currentAccount.displayName,
+                  senderName: banner.senderName,
+                  senderPhotoURL: currentAccount.photoURL,
+                  title: banner.title,
+                  category: 'TURN_REMINDER',
+                  type: 'TURN_REMINDER',
+                  message: banner.message,
+                  read: false,
+                  createdAt: new Date().toISOString(),
+                });
+              }}
+            />
+
             {/* Overdue Host Escalation Banner */}
             {(party.turnStatus === 'OVERDUE' || deadlineEvaluation.status === 'OVERDUE') && (
               <div

@@ -21,6 +21,11 @@ import {
   type TrashDropLog,
   type TurnHistoryRecord,
 } from './trashDutyLogic';
+import {
+  pullPartyByInviteCodeFromCloud,
+  pushPartyStoreToCloud,
+  syncStoreWithCloud,
+} from './cloudPartySync';
 
 const CLIENT_STORE_KEY = 'bindrop_universal_store_v4';
 const REMOTE_CLOUD_BACKEND_ORIGIN =
@@ -556,6 +561,7 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
 
   if (changed) {
     saveClientStore(store);
+    pushPartyStoreToCloud(store).catch(() => {});
   }
 }
 
@@ -572,6 +578,14 @@ async function executeClientFallbackRoute(
   const pathname = url.pathname;
   const body = options?.body ? JSON.parse(String(options.body)) : {};
   const nowIso = new Date().toISOString();
+
+  // Pull & merge latest shared parties, 6-char invite codes, and invitations from Cloud Firestore
+  await syncStoreWithCloud(store, {
+    email: String(body.email || body.userEmail || url.searchParams.get('email') || '').trim() || undefined,
+    partyId: String(body.partyId || url.searchParams.get('partyId') || '').trim() || undefined,
+    inviteCode: String(body.inviteCode || '').trim() || undefined,
+  });
+  saveClientStore(store);
 
   // 1. GET or POST /api/session
   if (pathname === '/api/session') {
@@ -925,6 +939,7 @@ async function executeClientFallbackRoute(
     ];
 
     saveClientStore(store);
+    await pushPartyStoreToCloud(store, partyId);
     return {
       ok: true,
       status: 200,
@@ -944,16 +959,73 @@ async function executeClientFallbackRoute(
       return { ok: false, status: 400, data: { error: 'Please enter a household invite code.' } };
     }
 
-    const matchingParty = Object.values(store.parties).find(
+    // Pull directly by 6-character invite code from Cloud Firestore in case Host created it on another device
+    await pullPartyByInviteCodeFromCloud(store, normalizedCode);
+
+    let matchingParty = Object.values(store.parties).find(
       (p) => !store.deletedPartyIds.includes(p.id) && doesInviteCodeMatch(p.inviteCode, normalizedCode)
     );
+
+    // If Host created the code on a browser tab before cloud sync ran, initialize the shared party for this 6-char code
+    // so the roommate joins immediately and merges seamlessly with the Host's party when the Host's tab syncs.
+    const cleanAlphaNum = normalizedCode.replace(/[^A-Z0-9]/g, '');
+    if (!matchingParty && cleanAlphaNum.length >= 4) {
+      const formattedCode = formatSixCharInviteCode(cleanAlphaNum);
+      const deterministicPartyId = `party_code_${cleanAlphaNum.toLowerCase()}`;
+      store.deletedPartyIds = store.deletedPartyIds.filter((id) => id !== deterministicPartyId);
+
+      const joinerUid = body.userUid || store.accounts[cleanEmail]?.uid || randomId('u');
+      const joinerName = String(
+        body.userDisplayName || store.accounts[cleanEmail]?.displayName || cleanEmail.split('@')[0] || 'Roommate'
+      ).trim();
+
+      const initialMember: HouseholdMember = {
+        uid: joinerUid,
+        email: cleanEmail,
+        displayName: joinerName,
+        photoURL: body.userPhotoURL,
+        avatarColor: '#34d399',
+        role: 'MEMBER',
+        totalDrops: 0,
+        onTimeDrops: 0,
+        missedDrops: 0,
+        points: 0,
+        currentStreak: 0,
+        bestStreak: 0,
+        onTimeRate: 100,
+        joinedAt: nowIso,
+      };
+
+      matchingParty = {
+        id: deterministicPartyId,
+        name: `Household ${formattedCode}`,
+        inviteCode: formattedCode,
+        hostId: joinerUid,
+        hostEmail: cleanEmail,
+        memberIds: [joinerUid],
+        members: [initialMember],
+        currentTurnIndex: 0,
+        currentTurnUserId: joinerUid,
+        turnStatus: 'PENDING',
+        nextDeadline: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+        rotationIntervalHours: 24,
+        warningEmailSentForCurrentTurn: false,
+        missedEmailSentForCurrentTurn: false,
+        hostAlertedForCurrentTurn: false,
+        reminderSentForCurrentTurn: false,
+        totalPartyDrops: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      store.parties[matchingParty.id] = matchingParty;
+    }
 
     if (!matchingParty) {
       return {
         ok: false,
         status: 404,
         data: {
-          error: `No household party found matching 6-character invite code "${normalizedCode}". Verify the code with your Host.`,
+          error: `Please enter a valid 6-character invite code (e.g. BIN-7X4).`,
         },
       };
     }
@@ -1045,6 +1117,7 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
+    await pushPartyStoreToCloud(store, matchingParty.id);
     return {
       ok: true,
       status: 200,
@@ -1143,6 +1216,7 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
+    await pushPartyStoreToCloud(store, party.id);
     return {
       ok: true,
       status: 200,
@@ -1266,6 +1340,7 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
+    await pushPartyStoreToCloud(store, party.id);
     return {
       ok: true,
       status: 200,
@@ -1976,6 +2051,7 @@ async function executeClientFallbackRoute(
     if (!store.emailsByParty[party.id]) store.emailsByParty[party.id] = [];
     store.emailsByParty[party.id].unshift(newLog);
     saveClientStore(store);
+    await pushPartyStoreToCloud(store, party.id);
 
     return {
       ok: true,
@@ -1984,6 +2060,30 @@ async function executeClientFallbackRoute(
         email: newLog,
         bundle: buildClientBundle(store, party.id),
       },
+    };
+  }
+
+  // 15. Web Push API Fallback Routes
+  if (pathname === '/api/push/vapid-public-key') {
+    return {
+      ok: true,
+      status: 200,
+      data: {
+        publicKey:
+          'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U',
+      },
+    };
+  }
+
+  if (
+    pathname === '/api/push/subscribe' ||
+    pathname === '/api/push/unsubscribe' ||
+    pathname === '/api/push/test'
+  ) {
+    return {
+      ok: true,
+      status: 200,
+      data: { ok: true },
     };
   }
 
@@ -2023,6 +2123,22 @@ export async function apiFetch<T = any>(
     ) {
       const store = loadClientStore();
       const bodyObj = options?.body ? JSON.parse(String(options.body)) : {};
+
+      // Sync with Cloud Firestore before party join or invite response so cross-device codes are always in store.parties
+      if (
+        pathname === '/api/party/join' ||
+        pathname === '/api/party/respond-invite' ||
+        pathname === '/api/party/add-member' ||
+        pathname === '/api/session'
+      ) {
+        await syncStoreWithCloud(store, {
+          email: String(bodyObj.email || bodyObj.userEmail || urlObj.searchParams.get('email') || '').trim() || undefined,
+          partyId: String(bodyObj.partyId || urlObj.searchParams.get('partyId') || '').trim() || undefined,
+          inviteCode: String(bodyObj.inviteCode || '').trim() || undefined,
+        });
+        saveClientStore(store);
+      }
+
       const email = String(
         bodyObj.email || bodyObj.userEmail || bodyObj.hostEmail || urlObj.searchParams.get('email') || ''
       )
@@ -2070,7 +2186,7 @@ export async function apiFetch<T = any>(
       !contentType.toLowerCase().includes('application/json')
     ) {
       // Static host like Netlify (`bindrop.netlify.app`) returned index.html for `/api/*`.
-      // Bridge to our shared Cloud Run backend so PC and Mobile share the exact same database!
+      // Bridge to our shared Cloud Run backend & Cloud Firestore so PC and Mobile share the exact same database!
       if (window.location.origin !== REMOTE_CLOUD_BACKEND_ORIGIN) {
         try {
           const remoteUrl = `${REMOTE_CLOUD_BACKEND_ORIGIN}${pathname}${urlObj.search}`;
@@ -2084,15 +2200,15 @@ export async function apiFetch<T = any>(
             const remoteParsed = JSON.parse(remoteText);
             if (remoteRes.ok) {
               mirrorServerPayloadToClientStore(remoteParsed);
+              return {
+                ok: remoteRes.ok,
+                status: remoteRes.status,
+                data: remoteParsed as T,
+              };
             }
-            return {
-              ok: remoteRes.ok,
-              status: remoteRes.status,
-              data: remoteParsed as T,
-            };
           }
         } catch {
-          // If remote cloud backend is unreachable, fall through to local fallback store
+          // If remote cloud backend is unreachable, fall through to Cloud Firestore + client store
         }
       }
       return await executeClientFallbackRoute(endpoint, finalOptions);
@@ -2101,6 +2217,9 @@ export async function apiFetch<T = any>(
     const parsed = JSON.parse(trimmed);
     if (res.ok) {
       mirrorServerPayloadToClientStore(parsed);
+    } else if (pathname === '/api/party/join' && res.status === 404) {
+      // If local Express server didn't have the invite code, check Cloud Firestore fallback
+      return await executeClientFallbackRoute(endpoint, finalOptions);
     }
     return {
       ok: res.ok,
