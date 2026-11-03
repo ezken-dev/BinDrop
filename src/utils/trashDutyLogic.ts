@@ -144,6 +144,7 @@ export interface HouseholdInvitation {
   status: 'PENDING' | 'ACCEPTED' | 'DECLINED';
   createdAt: string;
   respondedAt?: string;
+  partySnapshot?: PartyState;
 }
 
 export interface PartyAlertItem {
@@ -666,4 +667,26 @@ export function leavePartyMember(
     hostTransferred: wasHost,
   };
 }
+
+/**
+ * Identifies synthetic 1-person stub parties (`party_code_*` / `Household XXX-XXX`)
+ * so they can be purged and never trap users in separate standalone parties.
+ */
+export function isFakeStubParty(party?: PartyState | null): boolean {
+  if (!party || !party.id) return false;
+  if (party.id.startsWith('party_code_')) return true;
+  const formattedCode = formatSixCharInviteCode(party.inviteCode || '');
+  const rawCode = normalizeInviteCode(party.inviteCode || '');
+  const cleanName = String(party.name || '').trim().toUpperCase();
+  if (
+    formattedCode &&
+    (cleanName === `HOUSEHOLD ${formattedCode}` ||
+      (rawCode.length >= 4 && cleanName === `HOUSEHOLD ${rawCode}`))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+
 

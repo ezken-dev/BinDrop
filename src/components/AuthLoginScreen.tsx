@@ -24,6 +24,7 @@ import {
   type HouseholdInvitation,
 } from '../utils/trashDutyLogic';
 import { PRESET_AVATARS } from './MemberAvatar';
+import { InstallPwaBanner } from './InstallPwaBanner';
 
 export interface AuthenticatedAccount {
   uid: string;
@@ -227,7 +228,10 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
   // STEP 2: Authenticated user needs to Create or Join a Household Party
   if (currentAccount) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center px-4 py-8">
+      <div className="min-h-screen flex flex-col items-center justify-center px-4 py-8 gap-4">
+        <div className="w-full max-w-md">
+          <InstallPwaBanner compact />
+        </div>
         <div className="w-full max-w-md glass-panel-elevated rounded-[36px] p-6 sm:p-8 space-y-6 animate-view-enter">
           {/* Top Bar */}
           <div className="flex items-center justify-between">
@@ -644,7 +648,10 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
 
   // STEP 1: Unauthenticated User -> "Welcome Back" (Login) or "Sign Up Account" (Register)
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-4 py-8">
+    <div className="min-h-screen flex flex-col items-center justify-center px-4 py-8 gap-4">
+      <div className="w-full max-w-md">
+        <InstallPwaBanner compact />
+      </div>
       <div className="w-full max-w-md glass-panel-elevated rounded-[36px] p-6 sm:p-8 space-y-6 animate-view-enter">
         {/* Top Row matching the exact reference image header */}
         <div className="flex items-center justify-between">

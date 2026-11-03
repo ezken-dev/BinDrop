@@ -15,6 +15,7 @@ import {
   formatRotationDaysLabel,
   formatSixCharInviteCode,
   generateInviteCode,
+  isFakeStubParty,
   leavePartyMember,
   OFFICIAL_BINDROP_EMAIL,
   OFFICIAL_BINDROP_NAME,
@@ -30,6 +31,15 @@ import {
   type TrashDropLog,
   type TurnHistoryRecord,
 } from './src/utils/trashDutyLogic.js';
+import {
+  compactPartyForCloud,
+  deletePartiesFromCloud,
+  ensurePartyPublishedToCloud,
+  pullPartyByIdFromCloud,
+  pullPartyByInviteCodeFromCloud,
+  pushPartyStoreToCloud,
+  syncStoreWithCloud,
+} from './src/utils/cloudPartySync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -140,7 +150,10 @@ function loadStore(): PersistentStore {
       // Ensure all existing party invite codes are formatted as 6-char XXX-XXX codes matching the 6 UI boxes
       const deletedIds = parsed.deletedPartyIds || [];
       for (const pid of Object.keys(loadedParties)) {
-        if (deletedIds.includes(pid)) {
+        if (deletedIds.includes(pid) || isFakeStubParty(loadedParties[pid])) {
+          if (isFakeStubParty(loadedParties[pid]) && !deletedIds.includes(pid)) {
+            deletedIds.push(pid);
+          }
           delete loadedParties[pid];
           continue;
         }
@@ -150,8 +163,19 @@ function loadStore(): PersistentStore {
           );
         }
       }
+      const loadedAccounts = parsed.accounts || {};
+      for (const acc of Object.values(loadedAccounts)) {
+        if (
+          acc?.partyId &&
+          (deletedIds.includes(acc.partyId) ||
+            acc.partyId.startsWith('party_code_') ||
+            !loadedParties[acc.partyId])
+        ) {
+          acc.partyId = undefined;
+        }
+      }
       return {
-        accounts: parsed.accounts || {},
+        accounts: loadedAccounts,
         parties: loadedParties,
         dropsByParty: parsed.dropsByParty || {},
         historyByParty: parsed.historyByParty || {},
@@ -534,6 +558,21 @@ async function sendBackgroundWebPush(params: {
 function getPendingInvitationsForEmail(email?: string | null): HouseholdInvitation[] {
   const cleanEmail = String(email || '').trim().toLowerCase();
   if (!cleanEmail) return [];
+  for (const inv of store.invitations) {
+    if (
+      inv &&
+      inv.invitedEmail.toLowerCase() === cleanEmail &&
+      !store.deletedPartyIds.includes(inv.partyId) &&
+      !store.parties[inv.partyId] &&
+      inv.partySnapshot &&
+      !isFakeStubParty(inv.partySnapshot)
+    ) {
+      store.parties[inv.partyId] = {
+        ...inv.partySnapshot,
+        inviteCode: formatSixCharInviteCode(inv.partySnapshot.inviteCode),
+      };
+    }
+  }
   return store.invitations
     .filter(
       (inv) =>
@@ -696,7 +735,7 @@ function hydrateClientCachedBundleIfNeeded(
   }
 
   const ingestParty = (incomingParty: PartyState) => {
-    if (!incomingParty || !incomingParty.id) return;
+    if (!incomingParty || !incomingParty.id || isFakeStubParty(incomingParty)) return;
     const pid = incomingParty.id;
     if (store.deletedPartyIds.includes(pid)) return;
     if (cleanEmail && isLeftKeyMatchedServer(pid, cleanEmail)) return;
@@ -1230,6 +1269,13 @@ async function startServer() {
 
   app.use(express.json({ limit: '15mb' }));
 
+  // Publish active parties to Dual-Engine Cloud Sync on startup so their 6-char codes are discoverable everywhere
+  for (const partyId of Object.keys(store.parties)) {
+    if (!isFakeStubParty(store.parties[partyId])) {
+      ensurePartyPublishedToCloud(store as any, partyId).catch(() => {});
+    }
+  }
+
   // Background 10-second automated deadline & pop-up notification monitor
   setInterval(() => {
     for (const partyId of Object.keys(store.parties)) {
@@ -1315,6 +1361,7 @@ async function startServer() {
       cachedParties,
       cachedInvitations
     );
+    await syncStoreWithCloud(store as any, { email: cleanEmail });
 
     const nowIso = new Date().toISOString();
     let acc = store.accounts[cleanEmail];
@@ -1372,6 +1419,7 @@ async function startServer() {
       cachedParties,
       cachedInvitations
     );
+    await syncStoreWithCloud(store as any, { email: cleanEmail });
 
     // Built-in support for the official BinDrop email account login as well
     if (
@@ -1467,6 +1515,7 @@ async function startServer() {
       cachedParties,
       cachedInvitations
     );
+    await syncStoreWithCloud(store as any, { email: cleanEmail });
 
     const nowIso = new Date().toISOString();
     let account = store.accounts[cleanEmail];
@@ -1533,6 +1582,11 @@ async function startServer() {
       params.leftPartyKeys
     );
 
+    await syncStoreWithCloud(store as any, {
+      email: cleanEmail || undefined,
+      partyId: partyId || undefined,
+    });
+
     if (cleanEmail) {
       let acc = store.accounts[cleanEmail];
       if (!acc) {
@@ -1556,6 +1610,9 @@ async function startServer() {
         partyId,
         params.noAutoMatch
       );
+      if (resolvedPartyId) {
+        ensurePartyPublishedToCloud(store as any, resolvedPartyId).catch(() => {});
+      }
       const bundle = resolvedPartyId ? await buildPartyBundle(resolvedPartyId) : null;
       return {
         user: {
@@ -1572,6 +1629,7 @@ async function startServer() {
     }
 
     if (partyId && store.parties[partyId] && !store.deletedPartyIds.includes(partyId)) {
+      ensurePartyPublishedToCloud(store as any, partyId).catch(() => {});
       return {
         user: null,
         bundle: await buildPartyBundle(partyId),
@@ -1750,7 +1808,7 @@ async function startServer() {
     removeLeftKeyServer(partyId, cleanEmail);
 
     saveStore();
-    syncPartyToCloudFirestoreRest(partyId).catch(() => {});
+    await pushPartyStoreToCloud(store as any, partyId, { forceWrite: true });
     return res.json({
       user: {
         uid: acc.uid,
@@ -1787,8 +1845,13 @@ async function startServer() {
 
     hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
 
+    // Pull latest state for this 6-character code from Dual-Engine Cloud Sync (Ntfy + Firestore)
+    await pullPartyByInviteCodeFromCloud(store as any, normalizedCode, { forceFresh: true });
+
     let matchingParty = Object.values(store.parties).find(
       (p) =>
+        p &&
+        !isFakeStubParty(p) &&
         !store.deletedPartyIds.includes(p.id) &&
         doesInviteCodeMatch(p.inviteCode, normalizedCode)
     );
@@ -1797,65 +1860,10 @@ async function startServer() {
       matchingParty = (await pullPartyByCodeFromCloudFirestoreRest(normalizedCode)) || undefined;
     }
 
-    // If the Host created this 6-character code on another browser tab that hasn't synced yet,
-    // initialize the shared cloud party for this 6-character code so the roommate joins without a 404 error
-    // and merges seamlessly with the Host's party as soon as the Host's tab syncs.
-    const cleanAlphaNum = normalizedCode.replace(/[^A-Z0-9]/g, '');
-    if (!matchingParty && cleanAlphaNum.length >= 4) {
-      const formattedCode = formatSixCharInviteCode(cleanAlphaNum);
-      const deterministicPartyId = `party_code_${cleanAlphaNum.toLowerCase()}`;
-      store.deletedPartyIds = store.deletedPartyIds.filter((id) => id !== deterministicPartyId);
-
-      const nowIso = new Date().toISOString();
-      const joinerUid = userUid || store.accounts[cleanEmail]?.uid || `u_${crypto.randomBytes(6).toString('hex')}`;
-      const joinerName = String(
-        userDisplayName || store.accounts[cleanEmail]?.displayName || cleanEmail.split('@')[0] || 'Roommate'
-      ).trim();
-
-      const initialMember: HouseholdMember = {
-        uid: joinerUid,
-        email: cleanEmail,
-        displayName: joinerName,
-        photoURL: userPhotoURL,
-        avatarColor: '#34d399',
-        role: 'MEMBER',
-        totalDrops: 0,
-        onTimeDrops: 0,
-        missedDrops: 0,
-        points: 0,
-        currentStreak: 0,
-        bestStreak: 0,
-        onTimeRate: 100,
-        joinedAt: nowIso,
-      };
-
-      matchingParty = {
-        id: deterministicPartyId,
-        name: `Household ${formattedCode}`,
-        inviteCode: formattedCode,
-        hostId: joinerUid,
-        hostEmail: cleanEmail,
-        memberIds: [joinerUid],
-        members: [initialMember],
-        currentTurnIndex: 0,
-        currentTurnUserId: joinerUid,
-        turnStatus: 'PENDING',
-        nextDeadline: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-        rotationIntervalHours: 24,
-        warningEmailSentForCurrentTurn: false,
-        missedEmailSentForCurrentTurn: false,
-        hostAlertedForCurrentTurn: false,
-        reminderSentForCurrentTurn: false,
-        totalPartyDrops: 0,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-      store.parties[matchingParty.id] = matchingParty;
-    }
-
-    if (!matchingParty) {
+    if (!matchingParty || isFakeStubParty(matchingParty)) {
+      const formattedCode = formatSixCharInviteCode(normalizedCode);
       return res.status(404).json({
-        error: `Please enter a valid 6-character invite code (e.g. BIN-7X4).`,
+        error: `No active household party found with 6-character invite code "${formattedCode}". Ask your Host to open BinDrop and verify their 6-character code.`,
       });
     }
 
@@ -1921,7 +1929,9 @@ async function startServer() {
         onTimeRate: 100,
         joinedAt: nowIso,
       };
-      matchingParty.memberIds.push(newMember.uid);
+      if (!matchingParty.memberIds.includes(newMember.uid)) {
+        matchingParty.memberIds.push(newMember.uid);
+      }
       matchingParty.members.push(newMember);
       matchingParty.updatedAt = nowIso;
 
@@ -1950,10 +1960,11 @@ async function startServer() {
       existingMember.displayName = acc.displayName;
       if (acc.photoURL) existingMember.photoURL = acc.photoURL;
       matchingParty.memberIds = matchingParty.members.map((m) => m.uid);
+      matchingParty.updatedAt = nowIso;
     }
 
     saveStore();
-    syncPartyToCloudFirestoreRest(matchingParty.id).catch(() => {});
+    await pushPartyStoreToCloud(store as any, matchingParty.id, { forceWrite: true });
     sendBackgroundWebPush({
       targetEmails: [matchingParty.hostEmail],
       targetUserIds: [matchingParty.hostId],
@@ -1999,6 +2010,12 @@ async function startServer() {
     }
 
     hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
+    await syncStoreWithCloud(store as any, {
+      email: cleanEmail,
+      partyId: partyId ? String(partyId) : undefined,
+      inviteCode: inviteCode ? String(inviteCode) : undefined,
+      forceFresh: true,
+    });
 
     const inv = store.invitations.find(
       (i) =>
@@ -2015,6 +2032,7 @@ async function startServer() {
       if (inv) {
         inv.status = 'DECLINED';
         saveStore();
+        pushPartyStoreToCloud(store as any).catch(() => {});
       }
       return res.json({
         ok: true,
@@ -2023,15 +2041,35 @@ async function startServer() {
       });
     }
 
-    const targetParty =
-      (inv && store.parties[inv.partyId]) ||
-      (partyId && store.parties[partyId]) ||
-      (inviteCode &&
+    const resolvedPartyId = String(inv?.partyId || partyId || '');
+    const resolvedInviteCode = String(inv?.inviteCode || inviteCode || '');
+
+    let targetParty =
+      (resolvedPartyId && store.parties[resolvedPartyId]) ||
+      (resolvedInviteCode &&
         Object.values(store.parties).find(
           (p) =>
+            p &&
+            !isFakeStubParty(p) &&
             !store.deletedPartyIds.includes(p.id) &&
-            doesInviteCodeMatch(p.inviteCode, String(inviteCode))
+            doesInviteCodeMatch(p.inviteCode, resolvedInviteCode)
         ));
+
+    if (!targetParty && resolvedPartyId) {
+      targetParty =
+        (await pullPartyByIdFromCloud(store as any, resolvedPartyId, { forceFresh: true })) ||
+        undefined;
+    }
+    if (!targetParty && resolvedInviteCode) {
+      targetParty =
+        (await pullPartyByInviteCodeFromCloud(store as any, resolvedInviteCode, {
+          forceFresh: true,
+        })) || undefined;
+    }
+    if (!targetParty && inv?.partySnapshot && !isFakeStubParty(inv.partySnapshot)) {
+      targetParty = inv.partySnapshot;
+      store.parties[targetParty.id] = targetParty;
+    }
 
     if (!targetParty || store.deletedPartyIds.includes(targetParty.id)) {
       if (inv) {
@@ -2048,7 +2086,7 @@ async function startServer() {
       inv.status = 'ACCEPTED';
     }
     store.invitations = store.invitations.map((item) =>
-      item.partyId === targetParty.id && item.invitedEmail.toLowerCase() === cleanEmail
+      item.partyId === targetParty!.id && item.invitedEmail.toLowerCase() === cleanEmail
         ? { ...item, status: 'ACCEPTED' }
         : item
     );
@@ -2106,7 +2144,9 @@ async function startServer() {
         onTimeRate: 100,
         joinedAt: nowIso,
       };
-      targetParty.memberIds.push(newMember.uid);
+      if (!targetParty.memberIds.includes(newMember.uid)) {
+        targetParty.memberIds.push(newMember.uid);
+      }
       targetParty.members.push(newMember);
       targetParty.updatedAt = nowIso;
 
@@ -2135,9 +2175,11 @@ async function startServer() {
       existingMember.displayName = acc.displayName;
       if (acc.photoURL) existingMember.photoURL = acc.photoURL;
       targetParty.memberIds = targetParty.members.map((m: HouseholdMember) => m.uid);
+      targetParty.updatedAt = nowIso;
     }
 
     saveStore();
+    await pushPartyStoreToCloud(store as any, targetParty.id, { forceWrite: true });
     return res.json({
       ok: true,
       decision: 'ACCEPTED',
@@ -2231,6 +2273,7 @@ async function startServer() {
       if (inviteCodeToDelete.length >= 4) {
         deleteCloudFirestoreRestDoc(`code_${inviteCodeToDelete}`).catch(() => {});
       }
+      deletePartiesFromCloud(store as any, [partyId], [party.inviteCode]).catch(() => {});
     } else {
       store.parties[partyId] = leaveResult.updatedParty;
       if (!store.alertsByParty[partyId]) store.alertsByParty[partyId] = [];
@@ -2257,7 +2300,7 @@ async function startServer() {
         read: false,
         createdAt: nowIso,
       });
-      syncPartyToCloudFirestoreRest(partyId).catch(() => {});
+      pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
     }
 
     saveStore();
@@ -2380,6 +2423,7 @@ async function startServer() {
         deleteCloudFirestoreRestDoc(`code_${cleanCode}`).catch(() => {});
       }
     }
+    deletePartiesFromCloud(store as any, deletedIds, deletedCodes).catch(() => {});
 
     store.invitations = store.invitations.filter(
       (inv) => !deletedIds.includes(inv.partyId)
@@ -2478,6 +2522,7 @@ async function startServer() {
       invitedName: cleanName,
       status: 'PENDING',
       createdAt: nowIso,
+      partySnapshot: compactPartyForCloud(party),
     };
 
     if (existingInviteIdx >= 0) {
@@ -2505,7 +2550,7 @@ async function startServer() {
     });
 
     saveStore();
-    syncPartyToCloudFirestoreRest(party.id).catch(() => {});
+    await pushPartyStoreToCloud(store as any, party.id, { forceWrite: true });
     sendBackgroundWebPush({
       targetEmails: [cleanEmail],
       partyId: party.id,
@@ -2656,6 +2701,7 @@ async function startServer() {
       });
 
       saveStore();
+      pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
       return res.json({
         drop: verifiedDrop,
         bundle: await buildPartyBundle(partyId),
@@ -2704,6 +2750,7 @@ async function startServer() {
     });
 
     saveStore();
+    pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
     return res.json({
       drop: pendingDrop,
       bundle: await buildPartyBundle(partyId),
@@ -2768,6 +2815,7 @@ async function startServer() {
       });
 
       saveStore();
+      pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
       return res.json({
         drop: targetDrop,
         bundle: await buildPartyBundle(partyId),
@@ -2869,6 +2917,7 @@ async function startServer() {
     }
 
     saveStore();
+    pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
     return res.json({
       drop: targetDrop,
       bundle: await buildPartyBundle(partyId),
@@ -2905,6 +2954,7 @@ async function startServer() {
     }
     party.updatedAt = nowIso;
     saveStore();
+    pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
 
     return res.json({
       bundle: await buildPartyBundle(partyId),
@@ -2963,6 +3013,7 @@ async function startServer() {
     });
 
     saveStore();
+    pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
     return res.json({ bundle: await buildPartyBundle(partyId) });
   });
 

@@ -41,6 +41,7 @@ import {
   formatDateTimeReadable,
   formatRotationDaysLabel,
   formatSixCharInviteCode,
+  isFakeStubParty,
   OFFICIAL_BINDROP_EMAIL,
   OFFICIAL_BINDROP_NAME,
   ROTATION_DAY_OPTIONS,
@@ -64,6 +65,10 @@ import {
 } from './components/AuthLoginScreen';
 import { MemberAvatar } from './components/MemberAvatar';
 import { PushAlertsCard } from './components/PushAlertsCard';
+import {
+  InstallPwaBanner,
+  InstallPwaHeaderButton,
+} from './components/InstallPwaBanner';
 import { apiFetch, getInitialCachedBundleForAccount } from './utils/apiClient';
 import {
   registerBinDropServiceWorker,
@@ -170,7 +175,13 @@ export default function App() {
   const [currentAccount, setCurrentAccount] = useState<AuthenticatedAccount | null>(() => {
     try {
       const saved = localStorage.getItem(SESSION_STORAGE_KEY);
-      if (saved) return JSON.parse(saved) as AuthenticatedAccount;
+      if (saved) {
+        const parsed = JSON.parse(saved) as AuthenticatedAccount;
+        if (parsed.partyId && parsed.partyId.startsWith('party_code_')) {
+          parsed.partyId = null;
+        }
+        return parsed;
+      }
     } catch {
       // ignore storage errors
     }
@@ -180,10 +191,14 @@ export default function App() {
   // Hydrate cached party bundle synchronously on mount so pushing updates or reloading NEVER resets to "Create Household Party"
   const initialCachedBundle = useRef<PartyBundlePayload | null | undefined>(undefined);
   if (initialCachedBundle.current === undefined) {
-    initialCachedBundle.current = getInitialCachedBundleForAccount(
+    const candidate = getInitialCachedBundleForAccount(
       currentAccount?.email,
       currentAccount?.partyId
     );
+    initialCachedBundle.current =
+      candidate && candidate.party && !isFakeStubParty(candidate.party)
+        ? candidate
+        : null;
   }
 
   const [party, setParty] = useState<PartyState | null>(
@@ -284,8 +299,8 @@ export default function App() {
 
   const applyServerBundle = useCallback(
     (bundle: PartyBundlePayload | null, options?: { forceClearIfNull?: boolean }) => {
-      if (!bundle || !bundle.party) {
-        if (options?.forceClearIfNull) {
+      if (!bundle || !bundle.party || isFakeStubParty(bundle.party)) {
+        if (options?.forceClearIfNull || isFakeStubParty(bundle?.party)) {
           setParty(null);
           setDropLogs([]);
           setHistoryLogs([]);
@@ -452,10 +467,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: currentAccount.email,
-          partyId:
-            currentAccount.partyId !== undefined
-              ? currentAccount.partyId
-              : party?.id || null,
+          partyId: currentAccount.partyId || party?.id || null,
           displayName: currentAccount.displayName,
           uid: currentAccount.uid,
           photoURL: currentAccount.photoURL,
@@ -1422,8 +1434,10 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Zone 3: Notification Bell + Primary Action */}
+        {/* Zone 3: Install App CTA + Notification Bell + Primary Action */}
         <div className="flex items-center gap-2.5 shrink-0">
+          <InstallPwaHeaderButton />
+
           <button
             type="button"
             data-testid="top-notification-bell-btn"
@@ -1484,6 +1498,9 @@ export default function App() {
                   <X className="w-4 h-4" />
                 </button>
               </div>
+
+              {/* Dedicated Android & iOS Install Banner inside Notification Drawer */}
+              <InstallPwaBanner compact />
 
               {/* Native PWA Background Push Subscription & iOS Home Screen Rule Card */}
               <PushAlertsCard
@@ -1681,6 +1698,9 @@ export default function App() {
             <span>{celebrationBanner}</span>
           </div>
         )}
+
+        {/* Dedicated Android & iOS Browser Detection & Install App Banner */}
+        <InstallPwaBanner compact />
 
         {/* TAB 1: DUTY HUD */}
         {activeTab === 'hud' && (

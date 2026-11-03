@@ -306,36 +306,38 @@ export async function subscribeUserToBackgroundPush(params: {
     // ignore backend error if static host
   }
 
-  // Also persist in Cloud Firestore `bindrop_cloud/push_subs` so any device/server can push
+  // Also persist in Cloud Firestore `bindrop_cloud/push_subs` in the background (non-blocking)
   if (cleanEmail && subscriptionJson?.endpoint) {
-    try {
-      const subRef = doc(db, 'bindrop_cloud', 'push_subs');
-      const snap = await getDoc(subRef);
-      let existingList: any[] = [];
-      if (snap.exists() && typeof snap.data()?.payloadJson === 'string') {
-        existingList = JSON.parse(snap.data().payloadJson) || [];
+    (async () => {
+      try {
+        const subRef = doc(db, 'bindrop_cloud', 'push_subs');
+        const snap = await getDoc(subRef);
+        let existingList: any[] = [];
+        if (snap.exists() && typeof snap.data()?.payloadJson === 'string') {
+          existingList = JSON.parse(snap.data().payloadJson) || [];
+        }
+        const filtered = existingList.filter(
+          (item) => item.endpoint !== subscriptionJson?.endpoint && item.userEmail !== cleanEmail
+        );
+        filtered.unshift({
+          userEmail: cleanEmail,
+          userUid: params.userUid,
+          userDisplayName: params.userDisplayName,
+          partyId: params.partyId || null,
+          endpoint: subscriptionJson.endpoint,
+          subscription: subscriptionJson,
+          updatedAtIso: nowIso,
+        });
+        await setDoc(subRef, {
+          docId: 'push_subs',
+          kind: 'PUSH_SUBS',
+          payloadJson: JSON.stringify(filtered.slice(0, 60)),
+          updatedAtIso: nowIso,
+        });
+      } catch {
+        // ignore cloud error
       }
-      const filtered = existingList.filter(
-        (item) => item.endpoint !== subscriptionJson?.endpoint && item.userEmail !== cleanEmail
-      );
-      filtered.unshift({
-        userEmail: cleanEmail,
-        userUid: params.userUid,
-        userDisplayName: params.userDisplayName,
-        partyId: params.partyId || null,
-        endpoint: subscriptionJson.endpoint,
-        subscription: subscriptionJson,
-        updatedAtIso: nowIso,
-      });
-      await setDoc(subRef, {
-        docId: 'push_subs',
-        kind: 'PUSH_SUBS',
-        payloadJson: JSON.stringify(filtered.slice(0, 60)),
-        updatedAtIso: nowIso,
-      });
-    } catch {
-      // ignore cloud error
-    }
+    })();
   }
 
   saveLocalPushState({

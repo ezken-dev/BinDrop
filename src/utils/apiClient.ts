@@ -6,6 +6,7 @@ import {
   formatRotationDaysLabel,
   formatSixCharInviteCode,
   generateInviteCode,
+  isFakeStubParty,
   leavePartyMember,
   OFFICIAL_BINDROP_EMAIL,
   OFFICIAL_BINDROP_NAME,
@@ -23,8 +24,11 @@ import {
 } from './trashDutyLogic';
 import {
   addUserLeftKey,
+  compactPartyForCloud,
   deletePartiesFromCloud,
+  ensurePartyPublishedToCloud,
   isUserLeftKeyMatched,
+  pullPartyByIdFromCloud,
   pullPartyByInviteCodeFromCloud,
   pushPartyStoreToCloud,
   removeUserLeftKey,
@@ -69,7 +73,10 @@ function loadClientStore(): ClientStoreShape {
       const parties = parsed.parties || {};
       const deletedIds = parsed.deletedPartyIds || [];
       for (const pid of Object.keys(parties)) {
-        if (deletedIds.includes(pid)) {
+        if (deletedIds.includes(pid) || isFakeStubParty(parties[pid])) {
+          if (isFakeStubParty(parties[pid]) && !deletedIds.includes(pid)) {
+            deletedIds.push(pid);
+          }
           delete parties[pid];
           continue;
         }
@@ -77,8 +84,19 @@ function loadClientStore(): ClientStoreShape {
           parties[pid].inviteCode = formatSixCharInviteCode(parties[pid].inviteCode);
         }
       }
+      const accounts = parsed.accounts || {};
+      for (const acc of Object.values(accounts)) {
+        if (
+          acc?.partyId &&
+          (deletedIds.includes(acc.partyId) ||
+            acc.partyId.startsWith('party_code_') ||
+            !parties[acc.partyId])
+        ) {
+          acc.partyId = null;
+        }
+      }
       return {
-        accounts: parsed.accounts || {},
+        accounts,
         parties,
         dropsByParty: parsed.dropsByParty || {},
         historyByParty: parsed.historyByParty || {},
@@ -624,7 +642,9 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
 
   if (changed) {
     saveClientStore(store);
-    pushPartyStoreToCloud(store, bundle?.party?.id).catch(() => {});
+    if (bundle?.party?.id && !isFakeStubParty(bundle.party)) {
+      ensurePartyPublishedToCloud(store, bundle.party.id).catch(() => {});
+    }
   }
 }
 
@@ -655,6 +675,7 @@ async function executeClientFallbackRoute(
       partyId:
         String(body.partyId || url.searchParams.get('partyId') || '').trim() || undefined,
       inviteCode: String(body.inviteCode || '').trim() || undefined,
+      forceFresh: pathname === '/api/party/join' || pathname === '/api/party/respond-invite',
     });
     saveClientStore(store);
   } else {
@@ -693,6 +714,9 @@ async function executeClientFallbackRoute(
         store.accounts[email] = acc;
       }
       const activeParty = resolveClientUserParty(store, acc, partyId);
+      if (activeParty) {
+        ensurePartyPublishedToCloud(store, activeParty.id).catch(() => {});
+      }
       saveClientStore(store);
       return {
         ok: true,
@@ -1025,7 +1049,7 @@ async function executeClientFallbackRoute(
     store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, partyId, cleanEmail);
 
     saveClientStore(store);
-    pushPartyStoreToCloud(store, partyId).catch(() => {});
+    await pushPartyStoreToCloud(store, partyId, { forceWrite: true });
     return {
       ok: true,
       status: 200,
@@ -1045,73 +1069,24 @@ async function executeClientFallbackRoute(
       return { ok: false, status: 400, data: { error: 'Please enter a household invite code.' } };
     }
 
-    // Pull directly by 6-character invite code from Cloud Firestore in case Host created it on another device
-    await pullPartyByInviteCodeFromCloud(store, normalizedCode);
+    // Pull directly by 6-character invite code from Dual-Engine Cloud Sync (Ntfy + Firestore)
+    await pullPartyByInviteCodeFromCloud(store, normalizedCode, { forceFresh: true });
 
-    let matchingParty = Object.values(store.parties).find(
-      (p) => !store.deletedPartyIds.includes(p.id) && doesInviteCodeMatch(p.inviteCode, normalizedCode)
+    const matchingParty = Object.values(store.parties).find(
+      (p) =>
+        p &&
+        !isFakeStubParty(p) &&
+        !store.deletedPartyIds.includes(p.id) &&
+        doesInviteCodeMatch(p.inviteCode, normalizedCode)
     );
 
-    // If Host created the code on a browser tab before cloud sync ran, initialize the shared party for this 6-char code
-    // so the roommate joins immediately and merges seamlessly with the Host's party when the Host's tab syncs.
-    const cleanAlphaNum = normalizedCode.replace(/[^A-Z0-9]/g, '');
-    if (!matchingParty && cleanAlphaNum.length >= 4) {
-      const formattedCode = formatSixCharInviteCode(cleanAlphaNum);
-      const deterministicPartyId = `party_code_${cleanAlphaNum.toLowerCase()}`;
-      store.deletedPartyIds = store.deletedPartyIds.filter((id) => id !== deterministicPartyId);
-
-      const joinerUid = body.userUid || store.accounts[cleanEmail]?.uid || randomId('u');
-      const joinerName = String(
-        body.userDisplayName || store.accounts[cleanEmail]?.displayName || cleanEmail.split('@')[0] || 'Roommate'
-      ).trim();
-
-      const initialMember: HouseholdMember = {
-        uid: joinerUid,
-        email: cleanEmail,
-        displayName: joinerName,
-        photoURL: body.userPhotoURL,
-        avatarColor: '#34d399',
-        role: 'MEMBER',
-        totalDrops: 0,
-        onTimeDrops: 0,
-        missedDrops: 0,
-        points: 0,
-        currentStreak: 0,
-        bestStreak: 0,
-        onTimeRate: 100,
-        joinedAt: nowIso,
-      };
-
-      matchingParty = {
-        id: deterministicPartyId,
-        name: `Household ${formattedCode}`,
-        inviteCode: formattedCode,
-        hostId: joinerUid,
-        hostEmail: cleanEmail,
-        memberIds: [joinerUid],
-        members: [initialMember],
-        currentTurnIndex: 0,
-        currentTurnUserId: joinerUid,
-        turnStatus: 'PENDING',
-        nextDeadline: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-        rotationIntervalHours: 24,
-        warningEmailSentForCurrentTurn: false,
-        missedEmailSentForCurrentTurn: false,
-        hostAlertedForCurrentTurn: false,
-        reminderSentForCurrentTurn: false,
-        totalPartyDrops: 0,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-      store.parties[matchingParty.id] = matchingParty;
-    }
-
     if (!matchingParty) {
+      const formattedCode = formatSixCharInviteCode(normalizedCode);
       return {
         ok: false,
         status: 404,
         data: {
-          error: `Please enter a valid 6-character invite code (e.g. BIN-7X4).`,
+          error: `No active household party found with 6-character invite code "${formattedCode}". Ask your Host to open BinDrop and verify their 6-character code.`,
         },
       };
     }
@@ -1164,7 +1139,9 @@ async function executeClientFallbackRoute(
         onTimeRate: 100,
         joinedAt: nowIso,
       };
-      matchingParty.memberIds.push(newMember.uid);
+      if (!matchingParty.memberIds.includes(newMember.uid)) {
+        matchingParty.memberIds.push(newMember.uid);
+      }
       matchingParty.members.push(newMember);
       matchingParty.updatedAt = nowIso;
 
@@ -1182,10 +1159,19 @@ async function executeClientFallbackRoute(
         title: `👋 New Roommate Joined ${matchingParty.name}`,
         category: 'MEMBER_JOINED',
         type: 'TURN_REMINDER',
-        message: `${newMember.displayName} (${newMember.email}) joined using code ${matchingParty.inviteCode}!`,
+        message: `${newMember.displayName} (${newMember.email}) joined "${matchingParty.name}" using code ${matchingParty.inviteCode}!`,
         read: false,
         createdAt: nowIso,
       });
+    } else {
+      existingMember.displayName = acc.displayName || existingMember.displayName;
+      if (acc.photoURL && !existingMember.photoURL) {
+        existingMember.photoURL = acc.photoURL;
+      }
+      if (!matchingParty.memberIds.includes(existingMember.uid)) {
+        matchingParty.memberIds.push(existingMember.uid);
+      }
+      matchingParty.updatedAt = nowIso;
     }
 
     if (Array.isArray(store.invitations)) {
@@ -1202,7 +1188,7 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
-    pushPartyStoreToCloud(store, matchingParty.id).catch(() => {});
+    await pushPartyStoreToCloud(store, matchingParty.id, { forceWrite: true });
     return {
       ok: true,
       status: 200,
@@ -1261,6 +1247,7 @@ async function executeClientFallbackRoute(
 
     if (invitation) {
       invitation.invitedName = cleanName;
+      invitation.partySnapshot = compactPartyForCloud(party);
       invitation.createdAt = nowIso;
     } else {
       invitation = {
@@ -1277,6 +1264,7 @@ async function executeClientFallbackRoute(
         invitedEmail: cleanEmail,
         status: 'PENDING',
         createdAt: nowIso,
+        partySnapshot: compactPartyForCloud(party),
       };
       store.invitations.unshift(invitation);
     }
@@ -1301,7 +1289,7 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
-    pushPartyStoreToCloud(store, party.id).catch(() => {});
+    await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
     return {
       ok: true,
       status: 200,
@@ -1318,15 +1306,23 @@ async function executeClientFallbackRoute(
     const decision = String(body.decision || '').toUpperCase();
     if (!Array.isArray(store.invitations)) store.invitations = [];
 
-    const invitation = store.invitations.find((inv) => inv.id === body.invitationId);
-    if (!invitation) {
-      return { ok: false, status: 404, data: { error: 'Invitation not found or expired.' } };
+    let invitation = store.invitations.find((inv) => inv.id === body.invitationId);
+    if (!invitation && body.partyId) {
+      invitation = store.invitations.find(
+        (inv) =>
+          inv.partyId === body.partyId &&
+          inv.invitedEmail.toLowerCase() === cleanEmail &&
+          inv.status === 'PENDING'
+      );
     }
 
     if (decision === 'DECLINE') {
-      invitation.status = 'DECLINED';
-      invitation.respondedAt = nowIso;
+      if (invitation) {
+        invitation.status = 'DECLINED';
+        invitation.respondedAt = nowIso;
+      }
       saveClientStore(store);
+      pushPartyStoreToCloud(store).catch(() => {});
       return {
         ok: true,
         status: 200,
@@ -1336,10 +1332,29 @@ async function executeClientFallbackRoute(
       };
     }
 
-    const party = store.parties[invitation.partyId];
+    const targetPartyId = String(invitation?.partyId || body.partyId || '');
+    const targetInviteCode = String(invitation?.inviteCode || body.inviteCode || '');
+
+    let party = targetPartyId ? store.parties[targetPartyId] : undefined;
+    if (!party && targetPartyId) {
+      party =
+        (await pullPartyByIdFromCloud(store, targetPartyId, { forceFresh: true })) || undefined;
+    }
+    if (!party && targetInviteCode) {
+      party =
+        (await pullPartyByInviteCodeFromCloud(store, targetInviteCode, { forceFresh: true })) ||
+        undefined;
+    }
+    if (!party && invitation?.partySnapshot && !isFakeStubParty(invitation.partySnapshot)) {
+      party = invitation.partySnapshot;
+      store.parties[party.id] = party;
+    }
+
     if (!party || store.deletedPartyIds.includes(party.id)) {
-      invitation.status = 'DECLINED';
-      invitation.respondedAt = nowIso;
+      if (invitation) {
+        invitation.status = 'DECLINED';
+        invitation.respondedAt = nowIso;
+      }
       saveClientStore(store);
       return {
         ok: false,
@@ -1348,8 +1363,10 @@ async function executeClientFallbackRoute(
       };
     }
 
-    invitation.status = 'ACCEPTED';
-    invitation.respondedAt = nowIso;
+    if (invitation) {
+      invitation.status = 'ACCEPTED';
+      invitation.respondedAt = nowIso;
+    }
 
     store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
     store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, party.id, cleanEmail);
@@ -1357,7 +1374,10 @@ async function executeClientFallbackRoute(
     let acc = store.accounts[cleanEmail];
     const uid = body.userUid || acc?.uid || randomId('u');
     const displayName = String(
-      body.userDisplayName || acc?.displayName || invitation.invitedName || cleanEmail.split('@')[0]
+      body.userDisplayName ||
+        acc?.displayName ||
+        invitation?.invitedName ||
+        cleanEmail.split('@')[0]
     ).trim();
 
     if (!acc) {
@@ -1399,7 +1419,9 @@ async function executeClientFallbackRoute(
         onTimeRate: 100,
         joinedAt: nowIso,
       };
-      party.memberIds.push(newMember.uid);
+      if (!party.memberIds.includes(newMember.uid)) {
+        party.memberIds.push(newMember.uid);
+      }
       party.members.push(newMember);
       party.updatedAt = nowIso;
 
@@ -1421,10 +1443,16 @@ async function executeClientFallbackRoute(
         read: false,
         createdAt: nowIso,
       });
+    } else {
+      existingMember.displayName = acc.displayName || existingMember.displayName;
+      if (!party.memberIds.includes(existingMember.uid)) {
+        party.memberIds.push(existingMember.uid);
+      }
+      party.updatedAt = nowIso;
     }
 
     saveClientStore(store);
-    pushPartyStoreToCloud(store, party.id).catch(() => {});
+    await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
     return {
       ok: true,
       status: 200,
@@ -1792,6 +1820,7 @@ async function executeClientFallbackRoute(
       });
 
       saveClientStore(store);
+      pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
       return {
         ok: true,
         status: 200,
@@ -1840,6 +1869,7 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
+    pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
 
     return {
       ok: true,
@@ -1871,6 +1901,7 @@ async function executeClientFallbackRoute(
         String(body.hostReviewNote || '').trim() ||
         'Photo rejected by Host. Please upload a clear photo of the trash at the outdoor bin.';
       saveClientStore(store);
+      pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
       return {
         ok: true,
         status: 200,
@@ -1972,6 +2003,7 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
+    pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -2006,6 +2038,7 @@ async function executeClientFallbackRoute(
     }
     party.updatedAt = nowIso;
     saveClientStore(store);
+    pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -2065,6 +2098,7 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
+    pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
     return {
       ok: true,
       status: 200,
@@ -2111,6 +2145,7 @@ async function executeClientFallbackRoute(
         };
       });
       party.updatedAt = nowIso;
+      pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
     }
 
     saveClientStore(store);
@@ -2291,16 +2326,6 @@ export async function apiFetch<T = any>(
         .toLowerCase();
       const partyId = String(bodyObj.partyId || urlObj.searchParams.get('partyId') || '').trim();
       const isClearedUser = Boolean(email && store.clearedPartyUsers.includes(email) && !partyId);
-
-      // Run cloud sync in background so apiFetch never stalls before sending request
-      if (pathname === '/api/session') {
-        syncStoreWithCloud(store, {
-          email: email || undefined,
-          partyId: partyId || undefined,
-        })
-          .then(() => saveClientStore(store))
-          .catch(() => {});
-      }
 
       const cachedBundle = isClearedUser ? null : getInitialCachedBundleForAccount(email, partyId);
       const cachedParties = Object.values(store.parties).filter(
