@@ -24,6 +24,7 @@ import {
 } from './trashDutyLogic';
 import {
   addUserLeftKey,
+  chooseBestAvatar,
   compactPartyForCloud,
   deletePartiesFromCloud,
   ensurePartyPublishedToCloud,
@@ -32,7 +33,10 @@ import {
   pullPartyByInviteCodeFromCloud,
   pushPartyStoreToCloud,
   removeUserLeftKey,
+  setCachedMemberAvatar,
   syncStoreWithCloud,
+  writeMemberAvatarToCloud,
+  writeUserMembershipToCloud,
 } from './cloudPartySync';
 
 const CLIENT_STORE_KEY = 'bindrop_universal_store_v4';
@@ -213,12 +217,6 @@ function resolveClientUserParty(
     }
   }
 
-  // If the user explicitly deleted or left their household party, do NOT auto-match an older party
-  if (store.clearedPartyUsers.includes(cleanEmail)) {
-    acc.partyId = null;
-    return null;
-  }
-
   const matchedParty = Object.values(store.parties)
     .filter(
       (p) =>
@@ -238,6 +236,7 @@ function resolveClientUserParty(
     );
 
   if (matchedParty) {
+    store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
     acc.partyId = matchedParty.id;
     return matchedParty;
   }
@@ -572,12 +571,18 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
       }
     }
 
+    const existingPhoto = store.accounts[cleanEmail]?.photoURL;
+    const bestPhoto = chooseBestAvatar(existingPhoto, user.photoURL, cleanEmail);
+    if (bestPhoto) {
+      setCachedMemberAvatar(cleanEmail, bestPhoto);
+    }
+
     store.accounts[cleanEmail] = {
       ...(store.accounts[cleanEmail] || {}),
       uid: user.uid,
       email: cleanEmail,
       displayName: user.displayName,
-      photoURL: user.photoURL,
+      photoURL: bestPhoto,
       avatarColor: user.avatarColor || '#d0ff45',
       partyId: user.partyId || null,
       createdAt: store.accounts[cleanEmail]?.createdAt || new Date().toISOString(),
@@ -662,11 +667,14 @@ async function executeClientFallbackRoute(
   const body = options?.body ? JSON.parse(String(options.body)) : {};
   const nowIso = new Date().toISOString();
 
-  // Only await bounded cloud sync on routes that look up cross-device codes or sessions
+  // Await bounded cloud sync on routes that look up cross-device codes, sessions, or user logins
   if (
     pathname === '/api/party/join' ||
     pathname === '/api/party/respond-invite' ||
-    pathname === '/api/session'
+    pathname === '/api/session' ||
+    pathname === '/api/auth/google-sync' ||
+    pathname === '/api/auth/login' ||
+    pathname === '/api/auth/register'
   ) {
     await syncStoreWithCloud(store, {
       email:
@@ -675,11 +683,16 @@ async function executeClientFallbackRoute(
       partyId:
         String(body.partyId || url.searchParams.get('partyId') || '').trim() || undefined,
       inviteCode: String(body.inviteCode || '').trim() || undefined,
-      forceFresh: pathname === '/api/party/join' || pathname === '/api/party/respond-invite',
+      forceFresh:
+        pathname === '/api/party/join' ||
+        pathname === '/api/party/respond-invite' ||
+        pathname === '/api/auth/google-sync' ||
+        pathname === '/api/auth/login' ||
+        pathname === '/api/auth/register',
     });
     saveClientStore(store);
   } else {
-    // Non-blocking background cloud sync for auth, create, leave, delete so UI responds in <20ms
+    // Non-blocking background cloud sync for other mutations
     syncStoreWithCloud(store, {
       email:
         String(body.email || body.userEmail || url.searchParams.get('email') || '').trim() ||
@@ -705,16 +718,26 @@ async function executeClientFallbackRoute(
           uid: body.uid || randomId('u'),
           email,
           displayName: body.displayName || email.split('@')[0],
-          photoURL: body.photoURL || undefined,
+          photoURL: chooseBestAvatar(undefined, body.photoURL, email),
           avatarColor: '#d0ff45',
           partyId: partyId || null,
           createdAt: nowIso,
           updatedAt: nowIso,
         };
         store.accounts[email] = acc;
+      } else {
+        acc.photoURL = chooseBestAvatar(acc.photoURL, body.photoURL, email);
       }
       const activeParty = resolveClientUserParty(store, acc, partyId);
       if (activeParty) {
+        const selfMember = activeParty.members.find(
+          (m) => m.uid === acc.uid || m.email.toLowerCase() === email
+        );
+        if (selfMember) {
+          const bestAvatar = chooseBestAvatar(selfMember.photoURL, acc.photoURL, email);
+          selfMember.photoURL = bestAvatar;
+          acc.photoURL = bestAvatar;
+        }
         ensurePartyPublishedToCloud(store, activeParty.id).catch(() => {});
       }
       saveClientStore(store);
@@ -759,22 +782,22 @@ async function executeClientFallbackRoute(
       cleanEmail.split('@')[0].replace(/[._0-9]+/g, ' ').trim() ||
       'Household Member';
 
-    if (!acc) {
-      const existingParty = Object.values(store.parties).find(
-        (p) =>
-          !store.deletedPartyIds.includes(p.id) &&
-          !store.leftPartyKeys.includes(`${cleanEmail}:${p.id}`) &&
-          p.members.some((m) => m.email.toLowerCase() === cleanEmail)
-      );
-      const matchedMember = existingParty?.members.find(
-        (m) => m.email.toLowerCase() === cleanEmail
-      );
+    const existingParty = Object.values(store.parties).find(
+      (p) =>
+        !store.deletedPartyIds.includes(p.id) &&
+        !isUserLeftKeyMatched(store.leftPartyKeys, p.id, cleanEmail) &&
+        p.members.some((m) => m.email.toLowerCase() === cleanEmail)
+    );
+    const matchedMember = existingParty?.members.find(
+      (m) => m.email.toLowerCase() === cleanEmail
+    );
 
+    if (!acc) {
       acc = {
         uid: body.uid || matchedMember?.uid || randomId('u_google'),
         email: cleanEmail,
-        displayName: cleanName,
-        photoURL: body.photoURL || matchedMember?.photoURL || undefined,
+        displayName: matchedMember?.displayName || cleanName,
+        photoURL: chooseBestAvatar(matchedMember?.photoURL, body.photoURL, cleanEmail),
         avatarColor:
           matchedMember?.avatarColor ||
           AVATAR_COLORS[Object.keys(store.accounts).length % AVATAR_COLORS.length],
@@ -785,12 +808,26 @@ async function executeClientFallbackRoute(
       store.accounts[cleanEmail] = acc;
     } else {
       if (body.uid) acc.uid = body.uid;
-      if (cleanName) acc.displayName = cleanName;
-      if (body.photoURL && !acc.photoURL) acc.photoURL = body.photoURL;
+      if (cleanName && !acc.displayName) acc.displayName = cleanName;
+      acc.photoURL = chooseBestAvatar(
+        chooseBestAvatar(acc.photoURL, matchedMember?.photoURL, cleanEmail),
+        body.photoURL,
+        cleanEmail
+      );
       acc.updatedAt = nowIso;
     }
 
     const activeParty = resolveClientUserParty(store, acc, acc.partyId);
+    if (activeParty) {
+      const m = activeParty.members.find(
+        (mem) => mem.uid === acc.uid || mem.email.toLowerCase() === cleanEmail
+      );
+      if (m) {
+        const bestPhoto = chooseBestAvatar(m.photoURL, acc.photoURL, cleanEmail);
+        m.photoURL = bestPhoto;
+        acc.photoURL = bestPhoto;
+      }
+    }
     saveClientStore(store);
     return {
       ok: true,
@@ -798,6 +835,7 @@ async function executeClientFallbackRoute(
       data: {
         user: acc,
         bundle: activeParty ? buildClientBundle(store, activeParty.id) : null,
+        invitations: getPendingClientInvitationsForEmail(store, cleanEmail),
       },
     };
   }
@@ -1498,6 +1536,9 @@ async function executeClientFallbackRoute(
 
     if (!party) {
       saveClientStore(store);
+      if (cleanEmail) {
+        writeUserMembershipToCloud(cleanEmail, { partyId: null }).catch(() => {});
+      }
       pushPartyStoreToCloud(store).catch(() => {});
       return {
         ok: true,
@@ -1566,6 +1607,9 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
+    if (cleanEmail) {
+      writeUserMembershipToCloud(cleanEmail, { partyId: null }).catch(() => {});
+    }
     pushPartyStoreToCloud(store, party.id).catch(() => {});
     return {
       ok: true,
@@ -1673,6 +1717,9 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
+    if (cleanEmail) {
+      writeUserMembershipToCloud(cleanEmail, { partyId: null }).catch(() => {});
+    }
     deletePartiesFromCloud(store, deletedIds, deletedCodes).catch(() => {});
 
     const updatedUser = cleanEmail ? store.accounts[cleanEmail] || null : null;
@@ -2017,6 +2064,25 @@ async function executeClientFallbackRoute(
     if (!party) {
       return { ok: false, status: 404, data: { error: 'Party not found.' } };
     }
+    const callerUid = String(body.userId || body.userUid || '').trim();
+    const callerEmail = String(body.userEmail || '').trim().toLowerCase();
+    if (callerUid || callerEmail) {
+      const isHostCaller =
+        party.hostId === callerUid ||
+        (callerEmail && party.hostEmail.toLowerCase() === callerEmail) ||
+        party.members.some(
+          (m) =>
+            (m.uid === callerUid || (callerEmail && m.email.toLowerCase() === callerEmail)) &&
+            m.role === 'HOST'
+        );
+      if (!isHostCaller) {
+        return {
+          ok: false,
+          status: 403,
+          data: { error: 'Only the Household Host can change the rotation cycle.' },
+        };
+      }
+    }
     if (body.rotationIntervalHours !== undefined) {
       const cleanHours = Math.max(1, Number(body.rotationIntervalHours) || 24);
       party.rotationIntervalHours = cleanHours;
@@ -2133,17 +2199,27 @@ async function executeClientFallbackRoute(
       }
     }
 
+    if (cleanEmail && body.photoURL) {
+      setCachedMemberAvatar(cleanEmail, body.photoURL);
+      await writeMemberAvatarToCloud(cleanEmail, body.photoURL);
+    }
+
     if (body.partyId && store.parties[body.partyId]) {
       const party = store.parties[body.partyId];
       party.members = party.members.map((m) => {
         if (m.uid !== body.uid && (!cleanEmail || m.email.toLowerCase() !== cleanEmail)) {
           return m;
         }
+        const nextEmail = cleanEmail || m.email;
+        const nextPhoto = body.photoURL !== undefined ? body.photoURL : m.photoURL;
+        if (nextEmail && nextPhoto) {
+          setCachedMemberAvatar(nextEmail, nextPhoto);
+        }
         return {
           ...m,
           displayName: cleanName,
-          email: cleanEmail || m.email,
-          photoURL: body.photoURL !== undefined ? body.photoURL : m.photoURL,
+          email: nextEmail,
+          photoURL: nextPhoto,
         };
       });
       if (store.dropsByParty[party.id]) {
@@ -2353,7 +2429,19 @@ export async function apiFetch<T = any>(
         .trim()
         .toLowerCase();
       const partyId = String(bodyObj.partyId || urlObj.searchParams.get('partyId') || '').trim();
-      const isClearedUser = Boolean(email && store.clearedPartyUsers.includes(email) && !partyId);
+      const hasActiveLocalParty = Boolean(
+        email &&
+          Object.values(store.parties).some(
+            (p) =>
+              p &&
+              !store.deletedPartyIds.includes(p.id) &&
+              !isUserLeftKeyMatched(store.leftPartyKeys, p.id, email) &&
+              p.members.some((m) => m.email.toLowerCase() === email)
+          )
+      );
+      const isClearedUser = Boolean(
+        email && store.clearedPartyUsers.includes(email) && !partyId && !hasActiveLocalParty
+      );
 
       const cachedBundle = isClearedUser ? null : getInitialCachedBundleForAccount(email, partyId);
       const cachedParties = Object.values(store.parties).filter(
@@ -2381,7 +2469,7 @@ export async function apiFetch<T = any>(
               ? {
                   email: email || bodyObj.email,
                   partyId: isClearedUser ? '' : partyId || bodyObj.partyId || cachedBundle?.party?.id || '',
-                  noAutoMatch: isClearedUser,
+                  noAutoMatch: false,
                 }
               : {}),
             cachedBundle,

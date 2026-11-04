@@ -32,6 +32,7 @@ import {
   type TurnHistoryRecord,
 } from './src/utils/trashDutyLogic.js';
 import {
+  chooseBestAvatar,
   compactPartyForCloud,
   deletePartiesFromCloud,
   ensurePartyPublishedToCloud,
@@ -39,6 +40,8 @@ import {
   pullPartyByInviteCodeFromCloud,
   pushPartyStoreToCloud,
   syncStoreWithCloud,
+  writeMemberAvatarToCloud,
+  writeUserMembershipToCloud,
 } from './src/utils/cloudPartySync.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -642,8 +645,8 @@ function resolveUserPartyAndSyncMember(
     matchedParty = store.parties[acc.partyId];
   } else if (preferredPartyId && isMemberOfParty(store.parties[preferredPartyId])) {
     matchedParty = store.parties[preferredPartyId];
-  } else if (!noAutoMatch && !store.clearedPartyUsers.includes(cleanEmail)) {
-    // Search all active parties for this user's email or uid (most recently updated first)
+  } else if (!noAutoMatch) {
+    // Search all active parties (not deleted, not left by this user) for this user's email or uid
     const candidates = Object.values(store.parties)
       .filter((p) => isMemberOfParty(p))
       .sort(
@@ -662,10 +665,12 @@ function resolveUserPartyAndSyncMember(
     return null;
   }
 
+  // Since an active non-left party was found for this user, clear any stale clearedPartyUsers flag
+  store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
   matchedParty.inviteCode = formatSixCharInviteCode(matchedParty.inviteCode);
   acc.partyId = matchedParty.id;
 
-  // Keep member UID / displayName / photoURL synced in party roster
+  // Keep member UID / displayName / photoURL synced in party roster without overwriting custom avatars
   let rosterUpdated = false;
   matchedParty.members = matchedParty.members.map((m) => {
     if (m.uid === acc.uid || m.email.toLowerCase() === cleanEmail) {
@@ -680,8 +685,13 @@ function resolveUserPartyAndSyncMember(
         );
         rosterUpdated = true;
       }
-      if (acc.photoURL && !m.photoURL) {
-        m.photoURL = acc.photoURL;
+      const bestPhoto = chooseBestAvatar(m.photoURL, acc.photoURL, cleanEmail);
+      if (bestPhoto && bestPhoto !== m.photoURL) {
+        m.photoURL = bestPhoto;
+        rosterUpdated = true;
+      }
+      if (bestPhoto && bestPhoto !== acc.photoURL) {
+        acc.photoURL = bestPhoto;
         rosterUpdated = true;
       }
       return {
@@ -754,7 +764,6 @@ function hydrateClientCachedBundleIfNeeded(
     const pid = incomingParty.id;
     if (store.deletedPartyIds.includes(pid)) return;
     if (cleanEmail && isLeftKeyMatchedServer(pid, cleanEmail)) return;
-    if (cleanEmail && store.clearedPartyUsers!.includes(cleanEmail)) return;
 
     incomingParty.inviteCode = formatSixCharInviteCode(incomingParty.inviteCode);
     const existingParty = store.parties[pid];
@@ -1376,14 +1385,14 @@ async function startServer() {
       cachedParties,
       cachedInvitations
     );
-    await syncStoreWithCloud(store as any, { email: cleanEmail });
+    await syncStoreWithCloud(store as any, { email: cleanEmail, forceFresh: true });
 
     const nowIso = new Date().toISOString();
     let acc = store.accounts[cleanEmail];
     if (acc) {
       acc.displayName = cleanName;
       acc.passwordHash = hashPassword(rawPass);
-      if (photoURL) acc.photoURL = photoURL;
+      acc.photoURL = chooseBestAvatar(acc.photoURL, photoURL, cleanEmail);
       acc.updatedAt = nowIso;
     } else {
       const uid = `u_${crypto.randomBytes(6).toString('hex')}`;
@@ -1393,7 +1402,7 @@ async function startServer() {
         email: cleanEmail,
         displayName: cleanName,
         passwordHash: hashPassword(rawPass),
-        photoURL: photoURL || undefined,
+        photoURL: chooseBestAvatar(undefined, photoURL, cleanEmail),
         avatarColor,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -1434,7 +1443,7 @@ async function startServer() {
       cachedParties,
       cachedInvitations
     );
-    await syncStoreWithCloud(store as any, { email: cleanEmail });
+    await syncStoreWithCloud(store as any, { email: cleanEmail, forceFresh: true });
 
     // Built-in support for the official BinDrop email account login as well
     if (
@@ -1460,6 +1469,7 @@ async function startServer() {
       const memberParty = Object.values(store.parties).find(
         (p) =>
           !store.deletedPartyIds.includes(p.id) &&
+          !isLeftKeyMatchedServer(p.id, cleanEmail) &&
           (p.hostEmail.toLowerCase() === cleanEmail ||
             p.members.some((m) => m.email.toLowerCase() === cleanEmail))
       );
@@ -1473,7 +1483,7 @@ async function startServer() {
           email: cleanEmail,
           displayName: mInfo?.displayName || cleanEmail.split('@')[0],
           passwordHash: hashPassword(rawPass),
-          photoURL: mInfo?.photoURL,
+          photoURL: chooseBestAvatar(mInfo?.photoURL, undefined, cleanEmail),
           avatarColor: mInfo?.avatarColor || '#d0ff45',
           partyId: memberParty.id,
           createdAt: nowIso,
@@ -1530,7 +1540,7 @@ async function startServer() {
       cachedParties,
       cachedInvitations
     );
-    await syncStoreWithCloud(store as any, { email: cleanEmail });
+    await syncStoreWithCloud(store as any, { email: cleanEmail, forceFresh: true });
 
     const nowIso = new Date().toISOString();
     let account = store.accounts[cleanEmail];
@@ -1540,7 +1550,7 @@ async function startServer() {
         email: cleanEmail,
         displayName: String(displayName || cleanEmail.split('@')[0]).trim(),
         passwordHash: hashPassword(crypto.randomUUID()),
-        photoURL: photoURL || undefined,
+        photoURL: chooseBestAvatar(undefined, photoURL, cleanEmail),
         avatarColor: AVATAR_COLORS[Object.keys(store.accounts).length % AVATAR_COLORS.length],
         partyId: preferredPartyId || undefined,
         createdAt: nowIso,
@@ -1549,8 +1559,10 @@ async function startServer() {
       store.accounts[cleanEmail] = account;
     } else {
       if (uid) account.uid = uid;
-      if (displayName && displayName.trim()) account.displayName = displayName.trim();
-      if (photoURL && !account.photoURL) account.photoURL = photoURL;
+      if (displayName && displayName.trim() && !account.displayName) {
+        account.displayName = displayName.trim();
+      }
+      account.photoURL = chooseBestAvatar(account.photoURL, photoURL, cleanEmail);
       account.updatedAt = nowIso;
     }
 
@@ -1611,7 +1623,7 @@ async function startServer() {
           email: cleanEmail,
           displayName: params.displayName || cleanEmail.split('@')[0],
           passwordHash: hashPassword('bindrop123'),
-          photoURL: params.photoURL,
+          photoURL: chooseBestAvatar(undefined, params.photoURL, cleanEmail),
           avatarColor: AVATAR_COLORS[Object.keys(store.accounts).length % AVATAR_COLORS.length],
           partyId: partyId || undefined,
           createdAt: nowIso,
@@ -1619,6 +1631,8 @@ async function startServer() {
         };
         store.accounts[cleanEmail] = acc;
         saveStore();
+      } else {
+        acc.photoURL = chooseBestAvatar(acc.photoURL, params.photoURL, cleanEmail);
       }
       const resolvedPartyId = resolveUserPartyAndSyncMember(
         acc,
@@ -2319,6 +2333,9 @@ async function startServer() {
     }
 
     saveStore();
+    if (cleanEmail) {
+      writeUserMembershipToCloud(cleanEmail, { partyId: null }).catch(() => {});
+    }
     const acc = cleanEmail ? store.accounts[cleanEmail] : undefined;
     return res.json({
       ok: true,
@@ -2445,6 +2462,9 @@ async function startServer() {
     );
 
     saveStore();
+    if (cleanEmail) {
+      writeUserMembershipToCloud(cleanEmail, { partyId: null }).catch(() => {});
+    }
     const acc = cleanEmail ? store.accounts[cleanEmail] : undefined;
     return res.json({
       ok: true,
@@ -2939,12 +2959,33 @@ async function startServer() {
     });
   });
 
-  // Update deadline or multi-day rotation schedule (1 to 7 days)
+  // Update deadline or multi-day rotation schedule (1 to 7 days — Host Only)
   app.post('/api/party/deadline', async (req, res) => {
-    const { partyId, nextDeadlineIso, rotationIntervalHours } = req.body || {};
+    const { partyId, nextDeadlineIso, rotationIntervalHours, userId, userUid, userEmail } =
+      req.body || {};
     const party = store.parties[partyId];
     if (!party) {
       return res.status(404).json({ error: 'Party not found.' });
+    }
+
+    const callerUid = String(userId || userUid || '').trim();
+    const callerEmail = String(userEmail || '').trim().toLowerCase();
+    if (callerUid || callerEmail) {
+      const isHostCaller =
+        party.hostId === callerUid ||
+        (callerEmail && party.hostEmail.toLowerCase() === callerEmail) ||
+        party.members.some(
+          (m) =>
+            (m.uid === callerUid || (callerEmail && m.email.toLowerCase() === callerEmail)) &&
+            m.role === 'HOST'
+        ) ||
+        callerEmail === OFFICIAL_BINDROP_EMAIL;
+
+      if (!isHostCaller) {
+        return res.status(403).json({
+          error: 'Only the Household Host can change the rotation cycle.',
+        });
+      }
     }
 
     const nowIso = new Date().toISOString();
@@ -3125,6 +3166,9 @@ async function startServer() {
     }
 
     saveStore();
+    if (cleanEmail && photoURL) {
+      await writeMemberAvatarToCloud(cleanEmail, photoURL);
+    }
     for (const pid of targetPartyIds) {
       await pushPartyStoreToCloud(store as any, pid, { forceWrite: true });
       syncPartyToCloudFirestoreRest(pid).catch(() => {});

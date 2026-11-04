@@ -74,6 +74,7 @@ import {
   InstallPwaHeaderButton,
 } from './components/InstallPwaBanner';
 import { apiFetch, getInitialCachedBundleForAccount } from './utils/apiClient';
+import { chooseBestAvatar, setCachedMemberAvatar } from './utils/cloudPartySync';
 import {
   registerBinDropServiceWorker,
   triggerSystemNotificationViaServiceWorker,
@@ -413,14 +414,23 @@ export default function App() {
       if (!ok || !data) return;
       if (data.user) {
         setCurrentAccount((prev) => {
-          if (!prev) return data.user;
+          const bestPhoto = chooseBestAvatar(
+            prev?.photoURL,
+            data.user.photoURL,
+            data.user.email || prev?.email
+          );
+          const mergedUser = {
+            ...data.user,
+            photoURL: bestPhoto || data.user.photoURL,
+          };
+          if (!prev) return mergedUser;
           if (
-            prev.partyId !== data.user.partyId ||
-            prev.displayName !== data.user.displayName ||
-            prev.email !== data.user.email ||
-            prev.photoURL !== data.user.photoURL
+            prev.partyId !== mergedUser.partyId ||
+            prev.displayName !== mergedUser.displayName ||
+            prev.email !== mergedUser.email ||
+            prev.photoURL !== mergedUser.photoURL
           ) {
-            return data.user;
+            return mergedUser;
           }
           return prev;
         });
@@ -481,6 +491,11 @@ export default function App() {
       setFirebaseUser(user);
       if (user && user.email) {
         try {
+          const bestInitialPhoto = chooseBestAvatar(
+            undefined,
+            user.photoURL || undefined,
+            user.email
+          );
           const { ok, data } = await apiFetch('/api/auth/google-sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -488,11 +503,22 @@ export default function App() {
               uid: user.uid,
               email: user.email,
               displayName: user.displayName || user.email.split('@')[0],
-              photoURL: user.photoURL || undefined,
+              photoURL: bestInitialPhoto,
             }),
           });
           if (ok && data?.user) {
-            setCurrentAccount(data.user);
+            const resolvedPhoto = chooseBestAvatar(
+              data.user.photoURL,
+              bestInitialPhoto,
+              user.email
+            );
+            setCurrentAccount((prev) => ({
+              ...data.user,
+              photoURL: chooseBestAvatar(prev?.photoURL, resolvedPhoto, user.email),
+            }));
+            if (data.invitations) {
+              syncIncomingInvitations(data.invitations);
+            }
             if (data.bundle) {
               applyServerBundle(data.bundle);
             }
@@ -503,7 +529,7 @@ export default function App() {
       }
     });
     return () => unsubscribe();
-  }, [applyServerBundle]);
+  }, [applyServerBundle, syncIncomingInvitations]);
 
   // --- AUTHENTICATION HANDLERS ---
   const handleRegisterWithEmail = async (payload: {
@@ -586,6 +612,11 @@ export default function App() {
       }
       const { user } = result;
       if (user && user.email) {
+        const bestInitialPhoto = chooseBestAvatar(
+          currentAccount?.photoURL,
+          user.photoURL || undefined,
+          user.email
+        );
         const { ok, data } = await apiFetch('/api/auth/google-sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -593,12 +624,16 @@ export default function App() {
             uid: user.uid,
             email: user.email,
             displayName: user.displayName || user.email.split('@')[0],
-            photoURL: user.photoURL || undefined,
+            photoURL: bestInitialPhoto,
           }),
         });
         if (ok && data?.user) {
           sessionMutationEpochRef.current += 1;
-          setCurrentAccount(data.user);
+          setCurrentAccount({
+            ...data.user,
+            photoURL: chooseBestAvatar(data.user.photoURL, bestInitialPhoto, user.email),
+          });
+          if (data.invitations) syncIncomingInvitations(data.invitations);
           applyServerBundle(data.bundle, { forceClearIfNull: true });
           return { ok: true };
         }
@@ -1010,6 +1045,8 @@ export default function App() {
       body: JSON.stringify({
         partyId: party.id,
         nextDeadlineIso,
+        userId: currentAccount?.uid,
+        userEmail: currentAccount?.email,
       }),
     });
     if (ok && data?.bundle) {
@@ -1026,6 +1063,8 @@ export default function App() {
       body: JSON.stringify({
         partyId: party.id,
         rotationIntervalHours,
+        userId: currentAccount?.uid,
+        userEmail: currentAccount?.email,
       }),
     });
     if (ok && data?.bundle) {
@@ -1058,6 +1097,10 @@ export default function App() {
     uid: string,
     updates: { displayName: string; email?: string; photoURL?: string }
   ) => {
+    const targetEmail = (updates.email || currentAccount?.email || '').trim().toLowerCase();
+    if (targetEmail && updates.photoURL) {
+      setCachedMemberAvatar(targetEmail, updates.photoURL);
+    }
     const { ok, data } = await apiFetch('/api/party/profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

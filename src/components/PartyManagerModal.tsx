@@ -98,6 +98,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
   };
 
   const handleChangePartyRotationDays = async (hours: number) => {
+    if (!isHostOrAdmin) return;
     await onUpdateRotationIntervalHours(hours);
     const days = Math.round(hours / 24);
     setRotationBanner(
@@ -320,12 +321,17 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
           })}
         </div>
 
-        {/* 1-to-7 Day Cycle Selector */}
+        {/* 1-to-7 Day Cycle Selector (Host Only) */}
         <div className="pt-4 border-t border-white/[0.08] space-y-3">
-          <div className="flex items-center justify-between text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
             <span className="inline-flex items-center gap-1.5 og-medium text-zinc-300">
               <Calendar className="w-3.5 h-3.5 text-[#c8ff2e]" />
               <span>Rotation Cycle (1 to 7 Days):</span>
+              {!isHostOrAdmin && (
+                <span className="px-2 py-0.5 rounded-full bg-white/[0.07] border border-white/10 text-[10px] font-mono text-zinc-400">
+                  Host Only
+                </span>
+              )}
             </span>
             <span
               data-testid="active-rotation-days-label"
@@ -342,13 +348,16 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
                 <motion.button
                   key={opt.days}
                   type="button"
-                  whileTap={{ scale: 0.93 }}
+                  disabled={!isHostOrAdmin}
+                  whileTap={isHostOrAdmin ? { scale: 0.93 } : undefined}
                   data-testid={`party-rotation-day-${opt.days}`}
                   onClick={() => handleChangePartyRotationDays(opt.hours)}
                   className={`py-2 rounded-xl text-xs og-bold transition-colors border ${
                     isSelected
                       ? 'bg-[#c8ff2e] text-[#051807] border-[#c8ff2e]'
-                      : 'bg-[#09190b] text-zinc-300 border-white/10 hover:border-[#c8ff2e]/40'
+                      : isHostOrAdmin
+                      ? 'bg-[#09190b] text-zinc-300 border-white/10 hover:border-[#c8ff2e]/40'
+                      : 'bg-[#09190b]/60 text-zinc-500 border-white/[0.05] opacity-55 cursor-not-allowed'
                   }`}
                 >
                   {opt.shortLabel}
@@ -356,6 +365,12 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
               );
             })}
           </div>
+
+          {!isHostOrAdmin && (
+            <p className="text-[11px] text-zinc-400 og-regular">
+              Only the Household Host ({party.hostEmail}) can change the rotation cycle.
+            </p>
+          )}
         </div>
       </div>
 

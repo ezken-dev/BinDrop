@@ -45,8 +45,88 @@ function markFirestoreQuotaCooldown() {
 const lastWrittenHashByDocId = new Map<string, string>();
 const readCacheByDocId = new Map<string, { value: any; fetchedAt: number }>();
 const publishedActivePartyIdsInSession = new Set<string>();
+const CUSTOM_AVATAR_STORAGE_KEY = 'bindrop_custom_avatars_v1';
 const hydratedDropPhotoCache = new Map<string, string>();
 const hydratedAvatarCache = new Map<string, string>();
+
+try {
+  if (typeof localStorage !== 'undefined') {
+    const rawAvatars = localStorage.getItem(CUSTOM_AVATAR_STORAGE_KEY);
+    if (rawAvatars) {
+      const parsed = JSON.parse(rawAvatars) as Record<string, string>;
+      for (const [k, v] of Object.entries(parsed)) {
+        if (k && typeof v === 'string' && v.length > 20) {
+          hydratedAvatarCache.set(k.trim().toLowerCase(), v);
+        }
+      }
+    }
+  }
+} catch {
+  // ignore localStorage read errors
+}
+
+function persistCustomAvatarCacheToStorage() {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const obj: Record<string, string> = {};
+      for (const [k, v] of hydratedAvatarCache.entries()) {
+        if (k && v) obj[k] = v;
+      }
+      localStorage.setItem(CUSTOM_AVATAR_STORAGE_KEY, JSON.stringify(obj));
+    }
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function isCustomUploadedAvatar(url?: string | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  return url.startsWith('data:image/') && url.length > 80;
+}
+
+export function getCachedMemberAvatar(email?: string | null): string | undefined {
+  const clean = String(email || '').trim().toLowerCase();
+  if (!clean) return undefined;
+  return hydratedAvatarCache.get(clean);
+}
+
+export function setCachedMemberAvatar(email?: string | null, photoURL?: string | null): void {
+  const clean = String(email || '').trim().toLowerCase();
+  if (!clean || !photoURL || photoURL.length < 20) return;
+  const existing = hydratedAvatarCache.get(clean);
+  // Do not overwrite an existing custom uploaded data:image/ avatar with a default Google OAuth URL
+  if (isCustomUploadedAvatar(existing) && !isCustomUploadedAvatar(photoURL) && photoURL.includes('googleusercontent.com')) {
+    return;
+  }
+  hydratedAvatarCache.set(clean, photoURL);
+  persistCustomAvatarCacheToStorage();
+}
+
+export function chooseBestAvatar(
+  existingPhoto?: string | null,
+  incomingPhoto?: string | null,
+  email?: string | null
+): string | undefined {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cached = cleanEmail ? hydratedAvatarCache.get(cleanEmail) : undefined;
+
+  if (isCustomUploadedAvatar(incomingPhoto)) {
+    if (cleanEmail) setCachedMemberAvatar(cleanEmail, incomingPhoto!);
+    return incomingPhoto!;
+  }
+  if (isCustomUploadedAvatar(existingPhoto)) {
+    if (cleanEmail) setCachedMemberAvatar(cleanEmail, existingPhoto!);
+    return existingPhoto!;
+  }
+  if (isCustomUploadedAvatar(cached)) {
+    return cached!;
+  }
+  const chosen = incomingPhoto || existingPhoto || cached || undefined;
+  if (cleanEmail && chosen) {
+    setCachedMemberAvatar(cleanEmail, chosen);
+  }
+  return chosen;
+}
 
 export interface CloudSyncStoreLike {
   parties: Record<string, PartyState>;
@@ -57,6 +137,7 @@ export interface CloudSyncStoreLike {
   invitations: HouseholdInvitation[];
   deletedPartyIds: string[];
   leftPartyKeys: string[];
+  clearedPartyUsers?: string[];
 }
 
 export function cleanAlphanumericCode(code: string): string {
@@ -88,6 +169,15 @@ export function sanitizeAvatarDocId(email?: string | null): string {
   return `avatar_${clean}`;
 }
 
+export function sanitizeUserMembershipDocId(email?: string | null): string {
+  const clean = String(email || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_')
+    .slice(0, 42);
+  return `user_${clean}`;
+}
+
 /**
  * Compacts a party for cloud storage.
  * For `party_<pid>`, preserves compact member avatars (`<= 7000` chars) inline so all devices
@@ -104,21 +194,15 @@ export function compactPartyForCloud(
     inviteCode: formatSixCharInviteCode(party.inviteCode),
     lastDropImageUrl: undefined,
     members: (party.members || []).map((m) => {
-      if (m.email && m.photoURL && m.photoURL.length > 60) {
-        hydratedAvatarCache.set(m.email.trim().toLowerCase(), m.photoURL);
-      }
-      const cachedAvatar = m.email
-        ? hydratedAvatarCache.get(m.email.trim().toLowerCase())
-        : undefined;
-      const candidatePhoto = m.photoURL || cachedAvatar;
+      const bestPhoto = chooseBestAvatar(m.photoURL, undefined, m.email);
       return {
         ...m,
         photoURL:
-          candidatePhoto &&
-          candidatePhoto.length > maxInlineAvatarLen &&
-          candidatePhoto.startsWith('data:')
+          bestPhoto &&
+          bestPhoto.length > maxInlineAvatarLen &&
+          bestPhoto.startsWith('data:')
             ? undefined
-            : candidatePhoto,
+            : bestPhoto,
       };
     }),
   };
@@ -380,7 +464,14 @@ export async function readCloudDoc<T = any>(
 
 export async function writeCloudDoc(
   docId: string,
-  kind: 'GLOBAL_INDEX' | 'PARTY_BUNDLE' | 'INVITE_CODE' | 'INVITATIONS' | 'PUSH_SUBS' | 'PHOTO_BLOB',
+  kind:
+    | 'GLOBAL_INDEX'
+    | 'PARTY_BUNDLE'
+    | 'INVITE_CODE'
+    | 'INVITATIONS'
+    | 'PUSH_SUBS'
+    | 'PHOTO_BLOB'
+    | 'USER_MEMBERSHIP',
   payload: unknown,
   options?: { forceWrite?: boolean }
 ): Promise<void> {
@@ -533,11 +624,38 @@ export async function writeMemberAvatarToCloud(
 ): Promise<void> {
   const cleanEmail = String(email || '').trim().toLowerCase();
   if (!cleanEmail || !photoURL || photoURL.length < 20) return;
-  hydratedAvatarCache.set(cleanEmail, photoURL);
+  setCachedMemberAvatar(cleanEmail, photoURL);
   await writeCloudDoc(sanitizeAvatarDocId(cleanEmail), 'PHOTO_BLOB', {
     email: cleanEmail,
-    photoURL,
+    photoURL: getCachedMemberAvatar(cleanEmail) || photoURL,
     updatedAtIso: new Date().toISOString(),
+  });
+}
+
+/**
+ * Writes a lightweight per-user cloud pointer (`user_<email>`) so signing in with Google or email
+ * on any new device (PC or phone) immediately resolves the user's active household party.
+ */
+export async function writeUserMembershipToCloud(
+  email?: string | null,
+  membership?: {
+    partyId: string | null;
+    inviteCode?: string;
+    displayName?: string;
+    photoURL?: string;
+    updatedAtIso?: string;
+  }
+): Promise<void> {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !membership) return;
+  const bestPhoto = chooseBestAvatar(membership.photoURL, undefined, cleanEmail);
+  await writeCloudDoc(sanitizeUserMembershipDocId(cleanEmail), 'USER_MEMBERSHIP', {
+    email: cleanEmail,
+    partyId: membership.partyId || null,
+    inviteCode: membership.inviteCode ? formatSixCharInviteCode(membership.inviteCode) : undefined,
+    displayName: membership.displayName,
+    photoURL: bestPhoto && bestPhoto.length <= 7000 ? bestPhoto : undefined,
+    updatedAtIso: membership.updatedAtIso || new Date().toISOString(),
   });
 }
 
@@ -553,13 +671,13 @@ export async function hydratePartyMemberAvatarsFromCloud(
       if (!member || !member.email) return;
       const cleanEmail = member.email.trim().toLowerCase();
 
-      if (member.photoURL && member.photoURL.startsWith('data:image/') && member.photoURL.length > 100) {
-        hydratedAvatarCache.set(cleanEmail, member.photoURL);
+      if (isCustomUploadedAvatar(member.photoURL)) {
+        setCachedMemberAvatar(cleanEmail, member.photoURL);
         return;
       }
 
-      const cached = hydratedAvatarCache.get(cleanEmail);
-      if (cached) {
+      const cached = getCachedMemberAvatar(cleanEmail);
+      if (isCustomUploadedAvatar(cached)) {
         member.photoURL = cached;
         return;
       }
@@ -568,8 +686,10 @@ export async function hydratePartyMemberAvatarsFromCloud(
         sanitizeAvatarDocId(cleanEmail)
       );
       if (avatarDoc?.photoURL && avatarDoc.photoURL.length > 20) {
-        hydratedAvatarCache.set(cleanEmail, avatarDoc.photoURL);
-        member.photoURL = avatarDoc.photoURL;
+        const chosen = chooseBestAvatar(member.photoURL, avatarDoc.photoURL, cleanEmail);
+        if (chosen) member.photoURL = chosen;
+      } else if (cached && !member.photoURL) {
+        member.photoURL = cached;
       }
     })
   );
@@ -636,7 +756,10 @@ export function mergePartyStates(
     }
     const prev = mergedMembersMap.get(key);
     if (!prev) {
-      mergedMembersMap.set(key, { ...m });
+      mergedMembersMap.set(key, {
+        ...m,
+        photoURL: chooseBestAvatar(undefined, m.photoURL, key),
+      });
     } else {
       mergedMembersMap.set(key, {
         ...prev,
@@ -648,7 +771,7 @@ export function mergePartyStates(
         missedDrops: Math.max(prev.missedDrops || 0, m.missedDrops || 0),
         currentStreak: Math.max(prev.currentStreak || 0, m.currentStreak || 0),
         bestStreak: Math.max(prev.bestStreak || 0, m.bestStreak || 0),
-        photoURL: m.photoURL || prev.photoURL,
+        photoURL: chooseBestAvatar(prev.photoURL, m.photoURL, key),
       });
     }
   }
@@ -1017,10 +1140,25 @@ export async function pushPartyStoreToCloud(
       const compactParty = compactPartyForCloud(party);
       const indexCompactParty = compactPartyForCloud(party, { stripAvatarsForIndex: true });
 
-      // Sync each member's profile photo to `avatar_<email>` so custom avatars work globally across all devices
+      // Sync each member's profile photo to `avatar_<email>` and membership pointer to `user_<email>`
+      // so custom avatars and party membership work globally across phone and PC
       for (const m of party.members || []) {
-        if (m.email && m.photoURL && m.photoURL.length > 60) {
-          writeTasks.push(writeMemberAvatarToCloud(m.email, m.photoURL));
+        if (m.email) {
+          const bestPhoto = chooseBestAvatar(m.photoURL, undefined, m.email);
+          if (bestPhoto && bestPhoto.length > 60) {
+            writeTasks.push(writeMemberAvatarToCloud(m.email, bestPhoto));
+          }
+          if (!isUserLeftKeyMatched(store.leftPartyKeys, pid, m.email)) {
+            writeTasks.push(
+              writeUserMembershipToCloud(m.email, {
+                partyId: pid,
+                inviteCode: party.inviteCode,
+                displayName: m.displayName,
+                photoURL: bestPhoto,
+                updatedAtIso: party.updatedAt,
+              })
+            );
+          }
         }
       }
 
@@ -1126,6 +1264,7 @@ export async function pushPartyStoreToCloud(
 
     const existingGlobal = await readCloudDoc<{
       codeMap?: Record<string, string>;
+      userPartyMap?: Record<string, string>;
       parties?: Record<string, PartyState>;
       invitations?: HouseholdInvitation[];
       deletedPartyIds?: string[];
@@ -1144,6 +1283,7 @@ export async function pushPartyStoreToCloud(
 
     const mergedParties: Record<string, PartyState> = {};
     const mergedCodeMap: Record<string, string> = { ...(existingGlobal?.codeMap || {}) };
+    const mergedUserPartyMap: Record<string, string> = { ...(existingGlobal?.userPartyMap || {}) };
 
     for (const [pid, rp] of Object.entries(existingGlobal?.parties || {})) {
       if (!rp || isFakeStubParty(rp) || mergedDeleted.includes(pid)) continue;
@@ -1151,6 +1291,11 @@ export async function pushPartyStoreToCloud(
       mergedParties[pid] = compacted;
       const cCode = cleanAlphanumericCode(compacted.inviteCode);
       if (cCode.length >= 4) mergedCodeMap[cCode] = pid;
+      for (const m of compacted.members || []) {
+        if (m.email && !isUserLeftKeyMatched(mergedLeft, pid, m.email)) {
+          mergedUserPartyMap[m.email.trim().toLowerCase()] = pid;
+        }
+      }
     }
     for (const [pid, localParty] of Object.entries(store.parties)) {
       if (!localParty || isFakeStubParty(localParty) || mergedDeleted.includes(pid)) continue;
@@ -1165,12 +1310,22 @@ export async function pushPartyStoreToCloud(
       }
       const cCode = cleanAlphanumericCode(mergedParties[pid].inviteCode);
       if (cCode.length >= 4) mergedCodeMap[cCode] = pid;
+      for (const m of mergedParties[pid].members || []) {
+        if (m.email && !isUserLeftKeyMatched(mergedLeft, pid, m.email)) {
+          mergedUserPartyMap[m.email.trim().toLowerCase()] = pid;
+        }
+      }
     }
 
-    // Remove any deleted parties from codeMap
+    // Remove any deleted or left parties from codeMap and userPartyMap
     for (const [cCode, pid] of Object.entries(mergedCodeMap)) {
       if (mergedDeleted.includes(pid)) {
         delete mergedCodeMap[cCode];
+      }
+    }
+    for (const [uEmail, pid] of Object.entries(mergedUserPartyMap)) {
+      if (mergedDeleted.includes(pid) || isUserLeftKeyMatched(mergedLeft, pid, uEmail)) {
+        delete mergedUserPartyMap[uEmail];
       }
     }
 
@@ -1196,6 +1351,7 @@ export async function pushPartyStoreToCloud(
         'GLOBAL_INDEX',
         {
           codeMap: mergedCodeMap,
+          userPartyMap: mergedUserPartyMap,
           parties: mergedParties,
           invitations: mergedInvitations.map((inv) => ({
             ...inv,
@@ -1269,9 +1425,17 @@ export async function syncStoreWithCloud(
       const activePid = opts?.partyId;
       const cleanEmail = String(opts?.email || '').trim().toLowerCase();
 
-      const [globalDoc, bundleDoc, emailInvitesDoc, allInvitesDoc] = await Promise.all([
+      const [
+        globalDoc,
+        bundleDoc,
+        emailInvitesDoc,
+        allInvitesDoc,
+        userMembershipDoc,
+        userAvatarDoc,
+      ] = await Promise.all([
         readCloudDoc<{
           codeMap?: Record<string, string>;
+          userPartyMap?: Record<string, string>;
           parties?: Record<string, PartyState>;
           invitations?: HouseholdInvitation[];
           deletedPartyIds?: string[];
@@ -1295,7 +1459,29 @@ export async function syncStoreWithCloud(
         readCloudDoc<{ invitations?: HouseholdInvitation[] }>('invitations_all', {
           forceFresh,
         }),
+        cleanEmail
+          ? readCloudDoc<{
+              email: string;
+              partyId: string | null;
+              inviteCode?: string;
+              displayName?: string;
+              photoURL?: string;
+              updatedAtIso?: string;
+            }>(sanitizeUserMembershipDocId(cleanEmail), { forceFresh })
+          : Promise.resolve(null),
+        cleanEmail
+          ? readCloudDoc<{
+              email: string;
+              photoURL: string;
+            }>(sanitizeAvatarDocId(cleanEmail), { forceFresh })
+          : Promise.resolve(null),
       ]);
+
+      if (cleanEmail && userAvatarDoc?.photoURL && userAvatarDoc.photoURL.length > 20) {
+        setCachedMemberAvatar(cleanEmail, userAvatarDoc.photoURL);
+      } else if (cleanEmail && userMembershipDoc?.photoURL && userMembershipDoc.photoURL.length > 20) {
+        setCachedMemberAvatar(cleanEmail, userMembershipDoc.photoURL);
+      }
 
       if (globalDoc) {
         if (Array.isArray(globalDoc.deletedPartyIds)) {
@@ -1403,6 +1589,77 @@ export async function syncStoreWithCloud(
         await hydratePartyMemberAvatarsFromCloud(store, activePid);
       } else if (activePid && store.parties[activePid]) {
         await hydratePartyMemberAvatarsFromCloud(store, activePid);
+      }
+
+      // If a user signed in on PC/phone without knowing their partyId yet, resolve it from
+      // `user_<email>`, `global_index.userPartyMap`, or `store.parties` and pull the full party bundle!
+      if (cleanEmail) {
+        let candidatePartyId: string | undefined =
+          activePid && !store.deletedPartyIds.includes(activePid) ? activePid : undefined;
+
+        if (
+          !candidatePartyId &&
+          userMembershipDoc?.partyId &&
+          !store.deletedPartyIds.includes(userMembershipDoc.partyId) &&
+          !isUserLeftKeyMatched(store.leftPartyKeys, userMembershipDoc.partyId, cleanEmail)
+        ) {
+          candidatePartyId = userMembershipDoc.partyId;
+        }
+
+        if (
+          !candidatePartyId &&
+          globalDoc?.userPartyMap?.[cleanEmail] &&
+          !store.deletedPartyIds.includes(globalDoc.userPartyMap[cleanEmail]) &&
+          !isUserLeftKeyMatched(
+            store.leftPartyKeys,
+            globalDoc.userPartyMap[cleanEmail],
+            cleanEmail
+          )
+        ) {
+          candidatePartyId = globalDoc.userPartyMap[cleanEmail];
+        }
+
+        if (!candidatePartyId) {
+          const matchedFromStore = Object.values(store.parties)
+            .filter(
+              (p) =>
+                p &&
+                !isFakeStubParty(p) &&
+                !store.deletedPartyIds.includes(p.id) &&
+                !isUserLeftKeyMatched(store.leftPartyKeys, p.id, cleanEmail) &&
+                (p.hostEmail?.toLowerCase() === cleanEmail ||
+                  p.members?.some((m) => m.email?.toLowerCase() === cleanEmail))
+            )
+            .sort(
+              (a, b) =>
+                new Date(b.updatedAt || b.createdAt || 0).getTime() -
+                new Date(a.updatedAt || a.createdAt || 0).getTime()
+            )[0];
+          if (matchedFromStore) {
+            candidatePartyId = matchedFromStore.id;
+          }
+        }
+
+        if (candidatePartyId) {
+          if (candidatePartyId !== activePid || !store.parties[candidatePartyId]) {
+            await pullPartyByIdFromCloud(store, candidatePartyId, { forceFresh });
+          }
+          if (!store.parties[candidatePartyId] && userMembershipDoc?.inviteCode) {
+            await pullPartyByInviteCodeFromCloud(store, userMembershipDoc.inviteCode, {
+              forceFresh: true,
+            });
+          }
+          // If the cloud confirms the user is in an active party that hasn't been deleted or left,
+          // clear any stale local `clearedPartyUsers` entry so the PC loads their phone party!
+          if (
+            store.parties[candidatePartyId] &&
+            !store.deletedPartyIds.includes(candidatePartyId) &&
+            !isUserLeftKeyMatched(store.leftPartyKeys, candidatePartyId, cleanEmail) &&
+            Array.isArray(store.clearedPartyUsers)
+          ) {
+            store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
+          }
+        }
       }
 
       // Ensure any valid active party in store is published to the cloud once per session so its 6-char code is discoverable

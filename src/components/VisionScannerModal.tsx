@@ -47,22 +47,98 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const flashEnabledRef = useRef<boolean>(false);
 
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
   const [locationNote, setLocationNote] = useState('Main outdoor trash bin');
   const [isProcessingFile, setIsProcessingFile] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [flashEnabled, setFlashEnabled] = useState(false);
+  const [hardwareTorchActive, setHardwareTorchActive] = useState(false);
   const [shutterFlashActive, setShutterFlashActive] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const applyHardwareTorchToTrack = useCallback(
+    async (track: MediaStreamTrack | undefined, enabled: boolean): Promise<boolean> => {
+      if (!track || typeof track.applyConstraints !== 'function') {
+        return false;
+      }
+      try {
+        // Warm up photo capabilities on mobile Chrome / Android WebViews if ImageCapture is available
+        if (typeof window !== 'undefined' && 'ImageCapture' in window) {
+          try {
+            const ImageCaptureCtor = (window as unknown as { ImageCapture: new (t: MediaStreamTrack) => { getPhotoCapabilities?: () => Promise<unknown> } }).ImageCapture;
+            const ic = new ImageCaptureCtor(track);
+            if (typeof ic.getPhotoCapabilities === 'function') {
+              await ic.getPhotoCapabilities().catch(() => null);
+            }
+          } catch {
+            // ignore ImageCapture init errors
+          }
+        }
+
+        const capabilities =
+          typeof track.getCapabilities === 'function'
+            ? (track.getCapabilities() as Record<string, unknown>)
+            : null;
+
+        let applied = false;
+        try {
+          await track.applyConstraints({
+            advanced: [{ torch: enabled } as unknown as MediaTrackConstraintSet],
+          });
+          applied = true;
+        } catch {
+          try {
+            await track.applyConstraints({
+              torch: enabled,
+            } as unknown as MediaTrackConstraints);
+            applied = true;
+          } catch {
+            applied = false;
+          }
+        }
+
+        const settings =
+          typeof track.getSettings === 'function'
+            ? (track.getSettings() as Record<string, unknown>)
+            : null;
+
+        if (settings && settings.torch === enabled) {
+          return true;
+        }
+        if (applied && capabilities && 'torch' in capabilities && Boolean(capabilities.torch)) {
+          return true;
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
+
   const stopCameraStream = useCallback(() => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      const tracks = streamRef.current.getTracks();
+      for (const track of tracks) {
+        if (track.kind === 'video' && flashEnabledRef.current) {
+          try {
+            track
+              .applyConstraints({
+                advanced: [{ torch: false } as unknown as MediaTrackConstraintSet],
+              })
+              .catch(() => {});
+          } catch {
+            // ignore
+          }
+        }
+        track.stop();
+      }
       streamRef.current = null;
     }
+    setHardwareTorchActive(false);
     setCameraActive(false);
   }, []);
 
@@ -86,10 +162,16 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
         await videoRef.current.play().catch(() => {});
       }
       setCameraActive(true);
+
+      const videoTrack = stream.getVideoTracks()?.[0];
+      if (videoTrack && flashEnabledRef.current) {
+        const hwSupported = await applyHardwareTorchToTrack(videoTrack, true);
+        setHardwareTorchActive(hwSupported);
+      }
     } catch {
       setCameraActive(false);
     }
-  }, []);
+  }, [applyHardwareTorchToTrack]);
 
   useEffect(() => {
     if (isOpen && !previewDataUrl) {
@@ -104,34 +186,20 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
 
   const toggleFlash = async () => {
     const nextState = !flashEnabled;
+    flashEnabledRef.current = nextState;
     setFlashEnabled(nextState);
-    try {
-      const track = streamRef.current?.getVideoTracks()?.[0];
-      if (track && 'applyConstraints' in track) {
-        await track.applyConstraints({
-          advanced: [{ torch: nextState } as MediaTrackConstraintSet],
-        });
-      }
-    } catch {
-      // Hardware torch not supported on this device; visual shutter flash still works
+
+    const track = streamRef.current?.getVideoTracks()?.[0];
+    if (nextState) {
+      const hwSupported = await applyHardwareTorchToTrack(track, true);
+      setHardwareTorchActive(hwSupported);
+    } else {
+      await applyHardwareTorchToTrack(track, false);
+      setHardwareTorchActive(false);
     }
   };
 
-  const triggerAnalysisTransition = (dataUrl: string) => {
-    setPreviewDataUrl(dataUrl);
-    setIsAnalyzing(true);
-    setTimeout(() => {
-      setIsAnalyzing(false);
-    }, 650);
-  };
-
-  const handleCaptureFromLiveCamera = () => {
-    setErrorMessage(null);
-    if (flashEnabled) {
-      setShutterFlashActive(true);
-      setTimeout(() => setShutterFlashActive(false), 180);
-    }
-
+  const captureVideoFrameToDataUrl = () => {
     const video = videoRef.current;
     if (cameraActive && video && video.videoWidth > 0 && video.videoHeight > 0) {
       try {
@@ -144,21 +212,45 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
         if (ctx) {
           ctx.fillStyle = '#041206';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
+          if (flashEnabled && !hardwareTorchActive) {
+            ctx.filter = 'brightness(1.18) contrast(1.05)';
+          }
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          ctx.filter = 'none';
           const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
           if (dataUrl && dataUrl.length > 500) {
             stopCameraStream();
-            triggerAnalysisTransition(dataUrl);
-            return;
+            setPreviewDataUrl(dataUrl);
+            return true;
           }
         }
       } catch {
-        // Fallback to gallery picker below
+        // Fallback below
       }
     }
+    return false;
+  };
 
-    // If no live hardware camera stream is running, open the file/gallery picker
-    fileInputRef.current?.click();
+  const handleCaptureFromLiveCamera = () => {
+    setErrorMessage(null);
+    if (flashEnabled) {
+      setShutterFlashActive(true);
+      // If using screen flash fallback, let the bright screen illuminate the scene briefly before snapping frame
+      const captureDelayMs = hardwareTorchActive ? 40 : 140;
+      setTimeout(() => {
+        const captured = captureVideoFrameToDataUrl();
+        setTimeout(() => setShutterFlashActive(false), 140);
+        if (!captured) {
+          fileInputRef.current?.click();
+        }
+      }, captureDelayMs);
+      return;
+    }
+
+    const captured = captureVideoFrameToDataUrl();
+    if (!captured) {
+      fileInputRef.current?.click();
+    }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -169,7 +261,7 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
     try {
       const compressed = await compressUploadedImage(file);
       stopCameraStream();
-      triggerAnalysisTransition(compressed.dataUrl);
+      setPreviewDataUrl(compressed.dataUrl);
     } catch (err) {
       setErrorMessage(
         err instanceof Error ? err.message : 'Failed to process photo from device.'
@@ -245,27 +337,40 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
               data-testid="trash-photo-file-input"
             />
 
-            {/* Visual Shutter Flash Overlay */}
+            {/* Screen Torch Illumination Fallback Ring (Active when Flash is ON and device has no rear hardware LED) */}
+            <AnimatePresence>
+              {flashEnabled && !hardwareTorchActive && !previewDataUrl && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="absolute inset-0 z-30 pointer-events-none border-[16px] sm:border-[20px] border-white/95 shadow-[inset_0_0_100px_rgba(255,255,255,0.75)]"
+                />
+              )}
+            </AnimatePresence>
+
+            {/* Visual Shutter Flash Burst Overlay */}
             <AnimatePresence>
               {shutterFlashActive && (
                 <motion.div
-                  initial={{ opacity: 0.9 }}
-                  animate={{ opacity: 0 }}
+                  initial={{ opacity: 0.96 }}
+                  animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.22 }}
+                  transition={{ duration: 0.18 }}
                   className="absolute inset-0 z-40 bg-white pointer-events-none"
                 />
               )}
             </AnimatePresence>
 
-            {/* Full-Bleed Camera / Photo Preview Layer */}
+            {/* Full-Bleed Unobstructed Camera / Photo Preview Layer */}
             <div className="absolute inset-0 z-0 bg-[#141d15]">
               {previewDataUrl ? (
                 <motion.img
                   key="captured-preview"
-                  initial={{ scale: 1.04, opacity: 0.8 }}
+                  initial={{ scale: 1.03, opacity: 0.85 }}
                   animate={{ scale: 1, opacity: 1 }}
-                  transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+                  transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
                   src={previewDataUrl}
                   alt="Captured trash disposal proof"
                   className="w-full h-full object-cover"
@@ -279,27 +384,26 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
                     muted
                     className={`w-full h-full object-cover transition-opacity duration-300 ${
                       cameraActive ? 'opacity-100' : 'opacity-0'
-                    }`}
+                    } ${flashEnabled && !hardwareTorchActive ? 'brightness-115 contrast-105' : ''}`}
                   />
                   {!cameraActive && (
                     <div className="absolute inset-0">
                       <img
                         src={fallbackBackdropUrl}
                         alt="Trash viewfinder backdrop"
-                        className="w-full h-full object-cover opacity-55 brightness-75 contrast-110"
+                        className="w-full h-full object-cover opacity-65 brightness-85 contrast-105"
                       />
-                      <div className="absolute inset-0 bg-gradient-to-b from-[#071309]/70 via-transparent to-[#071309]/90" />
+                      <div className="absolute inset-0 bg-gradient-to-b from-[#071309]/55 via-transparent to-[#071309]/80" />
                     </div>
                   )}
                 </>
               )}
             </div>
 
-            {/* TOP FLOATING GLASS HEADER PILL (Matches Reference Right Screen) */}
+            {/* TOP FLOATING GLASS HEADER PILL */}
             <div className="relative z-20 pt-5 px-4 sm:px-5">
               <div className="w-full rounded-[24px] bg-[#2a332b]/80 backdrop-blur-xl border border-white/15 px-4 py-3.5 flex items-center justify-between gap-3 shadow-lg">
                 <div className="flex items-center gap-3.5 min-w-0">
-                  {/* Scanner Bracket Emblem */}
                   <div className="w-11 h-11 rounded-2xl bg-[#182619]/90 border border-[#c8ff2e]/30 flex items-center justify-center shrink-0">
                     <svg
                       className="w-5 h-5 text-[#c8ff2e]"
@@ -318,9 +422,16 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
                     </svg>
                   </div>
                   <div className="min-w-0">
-                    <h2 className="text-base sm:text-[17px] og-bold text-white truncate">
-                      Duty Photo Upload
-                    </h2>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-base sm:text-[17px] og-bold text-white truncate">
+                        Duty Photo Upload
+                      </h2>
+                      {flashEnabled && (
+                        <span className="px-2 py-0.5 rounded-full bg-[#c8ff2e]/20 border border-[#c8ff2e]/50 text-[#c8ff2e] text-[10px] og-bold shrink-0">
+                          {hardwareTorchActive ? 'LED Torch' : 'Flash On'}
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-zinc-300/90 og-regular truncate">
                       {nextCycleLabel}
                     </p>
@@ -339,64 +450,15 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
               </div>
             </div>
 
-            {/* CENTER LIME VIEWFINDER BRACKETS & DETECTION OVERLAY (Matches Reference Right Screen) */}
-            <div className="relative z-20 flex-1 flex flex-col items-center justify-center px-7 py-4">
-              <motion.div
-                animate={{
-                  scale: previewDataUrl ? 0.98 : 1,
-                }}
-                transition={{ type: 'spring', stiffness: 320, damping: 24 }}
-                className="relative w-full max-w-[290px] aspect-square flex items-center justify-center"
-              >
-                {/* Outer 4 Thick Lime Corner Brackets */}
-                <div className="absolute -top-3 -left-3 w-12 h-12 border-t-[4px] border-l-[4px] border-[#c8ff2e] rounded-tl-[22px] pointer-events-none" />
-                <div className="absolute -top-3 -right-3 w-12 h-12 border-t-[4px] border-r-[4px] border-[#c8ff2e] rounded-tr-[22px] pointer-events-none" />
-                <div className="absolute -bottom-3 -left-3 w-12 h-12 border-b-[4px] border-l-[4px] border-[#c8ff2e] rounded-bl-[22px] pointer-events-none" />
-                <div className="absolute -bottom-3 -right-3 w-12 h-12 border-b-[4px] border-r-[4px] border-[#c8ff2e] rounded-br-[22px] pointer-events-none" />
-
-                {/* Inner Translucent Olive-Tinted Framing Box with Inner Brackets */}
-                <div className="relative w-full h-full rounded-[24px] bg-[#364d18]/35 backdrop-blur-[2px] border border-[#c8ff2e]/35 flex flex-col items-center justify-center gap-2.5 p-5">
-                  {/* Inner subtle corner ticks */}
-                  <div className="absolute top-2.5 left-2.5 w-6 h-6 border-t-[2.5px] border-l-[2.5px] border-[#c8ff2e]/85 rounded-tl-xl pointer-events-none" />
-                  <div className="absolute top-2.5 right-2.5 w-6 h-6 border-t-[2.5px] border-r-[2.5px] border-[#c8ff2e]/85 rounded-tr-xl pointer-events-none" />
-                  <div className="absolute bottom-2.5 left-2.5 w-6 h-6 border-b-[2.5px] border-l-[2.5px] border-[#c8ff2e]/85 rounded-bl-xl pointer-events-none" />
-                  <div className="absolute bottom-2.5 right-2.5 w-6 h-6 border-b-[2.5px] border-r-[2.5px] border-[#c8ff2e]/85 rounded-br-xl pointer-events-none" />
-
-                  {/* Center Status Pills inside the Viewfinder */}
+            {/* UNOBSTRUCTED VIEWFINDER AREA (Only shows submission controls AFTER a photo is captured/picked) */}
+            <div className="relative z-20 flex-1 flex flex-col items-center justify-end px-5 pb-4 pointer-events-none">
+              <div className="w-full flex flex-col items-center gap-2.5 pointer-events-auto">
+                {previewDataUrl && (
                   <motion.div
-                    key={previewDataUrl ? 'detected' : 'scanning'}
-                    initial={{ opacity: 0, scale: 0.92, y: 6 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                    className="flex flex-col items-center gap-2.5"
-                  >
-                    <div className="px-4 py-1.5 rounded-full bg-[#253812]/90 border border-[#c8ff2e]/70 text-[#d8ff66] text-sm og-medium shadow-md">
-                      {previewDataUrl ? 'Waste Detected' : 'Waste Detected'}
-                    </div>
-                    <div className="px-4 py-1.5 rounded-full bg-[#253812]/90 border border-[#c8ff2e]/60 text-[#d8ff66] text-sm og-medium shadow-md">
-                      {isProcessingFile
-                        ? 'Processing...'
-                        : isAnalyzing
-                        ? 'Analyzing...'
-                        : previewDataUrl
-                        ? `Ready (+${rewardPreview.pointsAwarded} pts)`
-                        : 'Analyzing...'}
-                    </div>
-                  </motion.div>
-                </div>
-              </motion.div>
-
-              {/* Helper Pill & Optional Retake / Location Note below Frame */}
-              <div className="mt-6 w-full flex flex-col items-center gap-2.5">
-                {!previewDataUrl ? (
-                  <div className="px-5 py-2 rounded-full bg-[#262f28]/85 backdrop-blur-md border border-white/10 text-xs sm:text-sm text-zinc-200 og-regular shadow">
-                    Center trash in frame
-                  </div>
-                ) : (
-                  <motion.div
-                    initial={{ opacity: 0, y: 8 }}
+                    initial={{ opacity: 0, y: 12 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="w-full max-w-[320px] space-y-2"
+                    transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                    className="w-full max-w-[340px] rounded-[24px] bg-[#101c12]/90 backdrop-blur-xl border border-white/15 p-3.5 space-y-2.5 shadow-2xl"
                   >
                     <div className="flex items-center gap-2">
                       <input
@@ -455,14 +517,14 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
                 )}
 
                 {errorMessage && (
-                  <p className="text-xs text-rose-400 og-medium text-center bg-black/60 px-3 py-1 rounded-full">
+                  <p className="text-xs text-rose-400 og-medium text-center bg-black/75 px-3.5 py-1.5 rounded-full border border-rose-500/30">
                     {errorMessage}
                   </p>
                 )}
               </div>
             </div>
 
-            {/* BOTTOM CAMERA CONTROL DECK (Matches Reference Right Screen) */}
+            {/* BOTTOM CAMERA CONTROL DECK */}
             <div className="relative z-20 rounded-t-[34px] bg-[#162018]/95 backdrop-blur-2xl border-t border-white/10 px-7 pt-5 pb-7 flex items-center justify-between">
               {/* Left: Upload from Gallery */}
               <div className="flex flex-col items-center gap-1.5 w-24">
@@ -503,7 +565,6 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
                     {previewDataUrl ? (
                       <Check className="w-8 h-8 stroke-[2.8]" />
                     ) : (
-                      /* Camera Aperture Shutter Icon matching Reference */
                       <svg
                         className="w-9 h-9"
                         viewBox="0 0 24 24"
@@ -532,21 +593,27 @@ export const VisionScannerModal: React.FC<VisionScannerModalProps> = ({
                   type="button"
                   whileTap={{ scale: 0.9 }}
                   onClick={toggleFlash}
+                  data-testid="camera-flash-toggle-btn"
                   aria-label="Toggle Flash"
+                  aria-pressed={flashEnabled}
                   className={`w-13 h-13 rounded-full border flex items-center justify-center transition-colors shadow-md ${
                     flashEnabled
-                      ? 'bg-[#c8ff2e]/20 border-[#c8ff2e] text-[#c8ff2e]'
+                      ? 'bg-[#c8ff2e] border-[#c8ff2e] text-[#051807] shadow-[0_0_20px_rgba(200,255,46,0.5)]'
                       : 'bg-[#253027] hover:bg-[#2f3d31] border-white/15 text-zinc-200'
                   }`}
                 >
                   {flashEnabled ? (
-                    <Zap className="w-5 h-5" />
+                    <Zap className="w-5 h-5 fill-current" />
                   ) : (
                     <ZapOff className="w-5 h-5" />
                   )}
                 </motion.button>
-                <span className="text-[11px] text-zinc-300 og-regular text-center">
-                  Flash
+                <span
+                  className={`text-[11px] og-regular text-center ${
+                    flashEnabled ? 'text-[#c8ff2e] og-bold' : 'text-zinc-300'
+                  }`}
+                >
+                  {flashEnabled ? 'Flash On' : 'Flash'}
                 </span>
               </div>
             </div>

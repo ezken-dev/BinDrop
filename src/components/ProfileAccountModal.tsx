@@ -7,11 +7,16 @@ import {
   Check,
   LogOut,
   ChevronLeft,
+  Loader2,
 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import type { User } from 'firebase/auth';
 import { type HouseholdMember } from '../utils/trashDutyLogic';
 import { compressAvatarImage } from '../utils/sceneImageGenerator';
+import {
+  chooseBestAvatar,
+  setCachedMemberAvatar,
+} from '../utils/cloudPartySync';
 import { MemberAvatar, PRESET_AVATARS } from './MemberAvatar';
 import { PushAlertsCard } from './PushAlertsCard';
 import { InstallPwaBanner } from './InstallPwaBanner';
@@ -47,17 +52,21 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [displayNameInput, setDisplayNameInput] = useState(activeViewer.displayName);
   const [emailInput, setEmailInput] = useState(activeViewer.email || '');
-  const [photoPreview, setPhotoPreview] = useState<string | undefined>(activeViewer.photoURL);
+  const [photoPreview, setPhotoPreview] = useState<string | undefined>(() =>
+    chooseBestAvatar(activeViewer.photoURL, undefined, activeViewer.email)
+  );
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [saveSuccessState, setSaveSuccessState] = useState(false);
 
   useEffect(() => {
     setDisplayNameInput(activeViewer.displayName);
     setEmailInput(activeViewer.email || '');
-    setPhotoPreview(activeViewer.photoURL);
-    setStatusMessage(null);
-    setErrorMessage(null);
+    setPhotoPreview((prev) =>
+      chooseBestAvatar(prev, activeViewer.photoURL, activeViewer.email)
+    );
   }, [activeViewer.uid, activeViewer.displayName, activeViewer.email, activeViewer.photoURL]);
 
   const handlePhotoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -65,11 +74,15 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
     if (!file) return;
     setErrorMessage(null);
     setStatusMessage(null);
+    setSaveSuccessState(false);
     setIsUploadingPhoto(true);
     try {
       const compressed = await compressAvatarImage(file);
       setPhotoPreview(compressed.dataUrl);
-      setStatusMessage('Photo ready — tap Save Profile to sync across all household devices.');
+      if (activeViewer.email) {
+        setCachedMemberAvatar(activeViewer.email, compressed.dataUrl);
+      }
+      setStatusMessage('Photo ready — tap Save Profile to save to your profile.');
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to process profile picture.');
     } finally {
@@ -79,8 +92,10 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingProfile) return;
     setErrorMessage(null);
     setStatusMessage(null);
+    setSaveSuccessState(false);
 
     const trimmedName = displayNameInput.trim();
     const trimmedEmail = emailInput.trim().toLowerCase();
@@ -94,17 +109,30 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
       return;
     }
 
+    setIsSavingProfile(true);
     try {
-      await onUpdateProfile(activeViewer.uid, {
-        displayName: trimmedName,
-        email: trimmedEmail,
-        photoURL: photoPreview,
-      });
+      if (photoPreview) {
+        setCachedMemberAvatar(trimmedEmail, photoPreview);
+      }
+      await Promise.all([
+        onUpdateProfile(activeViewer.uid, {
+          displayName: trimmedName,
+          email: trimmedEmail,
+          photoURL: photoPreview,
+        }),
+        new Promise((resolve) => setTimeout(resolve, 600)),
+      ]);
+      setSaveSuccessState(true);
       setStatusMessage(
-        `Profile updated! Your name, photo, and notification email (${trimmedEmail}) are saved.`
+        'Edits saved to your profile! Your name and profile picture are synced across all devices.'
       );
+      setTimeout(() => {
+        setSaveSuccessState(false);
+      }, 3500);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to update profile.');
+    } finally {
+      setIsSavingProfile(false);
     }
   };
 
@@ -155,6 +183,7 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
             <MemberAvatar
               member={{
                 displayName: displayNameInput || activeViewer.displayName,
+                email: activeViewer.email,
                 photoURL: photoPreview,
                 avatarColor: activeViewer.avatarColor,
               }}
@@ -206,7 +235,10 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
                   key={preset.id}
                   type="button"
                   whileTap={{ scale: 0.9 }}
-                  onClick={() => setPhotoPreview(preset.url)}
+                  onClick={() => {
+                    setPhotoPreview(preset.url);
+                    setSaveSuccessState(false);
+                  }}
                   aria-label={`Select ${preset.label} avatar`}
                   className={`w-9 h-9 rounded-full overflow-hidden transition-transform ${
                     isSelected
@@ -241,7 +273,10 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
                 id="profile-display-name"
                 type="text"
                 value={displayNameInput}
-                onChange={(e) => setDisplayNameInput(e.target.value)}
+                onChange={(e) => {
+                  setDisplayNameInput(e.target.value);
+                  setSaveSuccessState(false);
+                }}
                 placeholder="Enter your display name"
                 className="pill-input w-full pl-11 pr-4 py-3 rounded-full text-sm text-white placeholder:text-zinc-500"
               />
@@ -261,33 +296,96 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
                 id="profile-email-address"
                 type="email"
                 value={emailInput}
-                onChange={(e) => setEmailInput(e.target.value)}
+                onChange={(e) => {
+                  setEmailInput(e.target.value);
+                  setSaveSuccessState(false);
+                }}
                 placeholder="Enter your email address"
                 className="pill-input w-full pl-11 pr-4 py-3 rounded-full text-sm text-white placeholder:text-zinc-500"
               />
             </div>
           </div>
 
-          {errorMessage && (
-            <p className="text-xs text-rose-400 og-medium text-center">{errorMessage}</p>
-          )}
-          {statusMessage && (
-            <p
-              data-testid="profile-save-confirmation"
-              className="text-xs text-[#c8ff2e] og-medium text-center flex items-center justify-center gap-1.5"
-            >
-              <Check className="w-4 h-4" />
-              {statusMessage}
-            </p>
-          )}
+          <AnimatePresence mode="wait">
+            {errorMessage && (
+              <motion.p
+                key="profile-error"
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                className="text-xs text-rose-400 og-medium text-center"
+              >
+                {errorMessage}
+              </motion.p>
+            )}
+            {statusMessage && (
+              <motion.div
+                key="profile-status"
+                initial={{ opacity: 0, scale: 0.96, y: 4 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.96, y: -4 }}
+                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                data-testid="profile-save-confirmation"
+                className="p-3 rounded-2xl bg-[#132a16] border border-[#c8ff2e]/45 text-xs text-[#c8ff2e] og-medium text-center flex items-center justify-center gap-2"
+              >
+                <div className="w-5 h-5 rounded-full bg-[#c8ff2e] text-[#051807] flex items-center justify-center shrink-0">
+                  <Check className="w-3.5 h-3.5 stroke-[2.8]" />
+                </div>
+                <span>{statusMessage}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           <motion.button
             type="submit"
+            disabled={isSavingProfile || isUploadingPhoto}
             whileTap={{ scale: 0.96 }}
-            className="lime-cta w-full py-3.5 px-6 rounded-full og-bold text-sm flex items-center justify-center gap-2 min-h-[48px]"
+            data-testid="save-profile-submit-btn"
+            className={`w-full py-3.5 px-6 rounded-full og-bold text-sm flex items-center justify-center gap-2 min-h-[48px] transition-all duration-200 ${
+              saveSuccessState
+                ? 'bg-[#19381d] border-2 border-[#c8ff2e] text-[#c8ff2e] shadow-[0_0_28px_rgba(200,255,46,0.3)]'
+                : 'lime-cta'
+            } disabled:opacity-75`}
           >
-            <span>Save Profile</span>
-            <ArrowRight className="w-4 h-4" />
+            <AnimatePresence mode="wait" initial={false}>
+              {isSavingProfile ? (
+                <motion.span
+                  key="saving-state"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.18 }}
+                  className="inline-flex items-center gap-2"
+                >
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Saving Edits to Database...</span>
+                </motion.span>
+              ) : saveSuccessState ? (
+                <motion.span
+                  key="saved-state"
+                  initial={{ opacity: 0, scale: 0.92 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.92 }}
+                  transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                  className="inline-flex items-center gap-2"
+                >
+                  <Check className="w-4 h-4 stroke-[2.8]" />
+                  <span>Edits Saved to Profile!</span>
+                </motion.span>
+              ) : (
+                <motion.span
+                  key="idle-state"
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.16 }}
+                  className="inline-flex items-center gap-2"
+                >
+                  <span>Save Profile</span>
+                  <ArrowRight className="w-4 h-4" />
+                </motion.span>
+              )}
+            </AnimatePresence>
           </motion.button>
         </form>
 

@@ -1,5 +1,6 @@
 import React from 'react';
 import type { HouseholdMember } from '../utils/trashDutyLogic';
+import { chooseBestAvatar } from '../utils/cloudPartySync';
 
 function makeAvatarSvg(bg1: string, bg2: string, accent: string, label: string): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
@@ -27,7 +28,9 @@ export const PRESET_AVATARS: { id: string; label: string; url: string }[] = [
 ];
 
 interface MemberAvatarProps {
-  member: Pick<HouseholdMember, 'displayName' | 'photoURL' | 'avatarColor'>;
+  member: Pick<HouseholdMember, 'displayName' | 'photoURL' | 'avatarColor'> & {
+    email?: string;
+  };
   size?: 'sm' | 'md' | 'lg' | 'xl';
   highlightRing?: boolean;
 }
@@ -49,13 +52,15 @@ export const MemberAvatar: React.FC<MemberAvatarProps> = ({
     ? 'ring-2 ring-[#c6ff00] ring-offset-2 ring-offset-[#060804]'
     : 'border border-white/15';
 
-  if (member.photoURL) {
+  const resolvedPhotoUrl = chooseBestAvatar(member.photoURL, undefined, member.email);
+
+  if (resolvedPhotoUrl) {
     return (
       <div
         className={`${sizeClasses} ${ringClasses} rounded-full overflow-hidden bg-[#141812] shrink-0 relative`}
       >
         <img
-          src={member.photoURL}
+          src={resolvedPhotoUrl}
           alt={member.displayName}
           referrerPolicy="no-referrer"
           className="w-full h-full object-cover"
