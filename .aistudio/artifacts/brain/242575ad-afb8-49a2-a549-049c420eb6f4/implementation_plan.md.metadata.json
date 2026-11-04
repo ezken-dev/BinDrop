@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan to fix infinite Sign-In (\"Please wait...\"), Create Party (\"Creating...\"), and Join Party (\"Joining...\") states, and permanently stop deleted or left parties from reappearing.",
-  "updatedAt": "2026-11-03T05:34:33.102817938Z",
+  "summary": "Plan to remove all test alert/deadline buttons, enable global cross-device profile picture sync, fix the Android/PC notification icon white-box issue with a true transparent alpha badge PNG, and replace the static Current Streak graph with an interactive flame counter, milestone progress bar, turn dots, and a tap-to-open Streak Breakdown sheet.",
+  "updatedAt": "2026-11-04T05:28:35.682650280Z",
   "requestFeedback": true,
   "userFacing": true
 }

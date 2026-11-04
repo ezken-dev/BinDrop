@@ -13,7 +13,10 @@ import {
   LogOut,
   Trash2,
   AlertTriangle,
+  SkipForward,
+  BellRing,
 } from 'lucide-react';
+import { motion } from 'motion/react';
 import {
   formatRotationDaysLabel,
   formatSixCharInviteCode,
@@ -40,6 +43,8 @@ interface PartyManagerViewProps {
     memberEmail: string;
   }) => Promise<void>;
   onUpdateRotationIntervalHours: (hours: number) => Promise<void>;
+  onHostSkipTurn?: () => Promise<void>;
+  onNudgeActiveAssignee?: () => void;
   onLeaveParty?: () => Promise<void>;
   onDeleteParty?: () => Promise<void>;
 }
@@ -53,6 +58,8 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
   onJoinExistingPartyByCode,
   onAddRoommateWithEmail,
   onUpdateRotationIntervalHours,
+  onHostSkipTurn,
+  onNudgeActiveAssignee,
   onLeaveParty,
   onDeleteParty,
 }) => {
@@ -127,7 +134,7 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
       setRoommateName('');
       setRoommateEmail('');
       setAddSuccess(
-        `Sent Household Invitation to ${cleanName} (${cleanEmail})! It now appears in their Invitations tab & pop-up alerts.`
+        `Sent Household Invitation to ${cleanName} (${cleanEmail})! It now appears in their Invitations tab.`
       );
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Could not send roommate invitation.');
@@ -216,101 +223,194 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
   const nextRoommateForHostTransfer = party.members.find((m) => m.uid !== currentUserId);
 
   return (
-    <div className="animate-view-enter space-y-6">
-      {/* Active Household 1-to-7 Day Rotation Schedule Bar */}
-      <div className="glass-panel rounded-[28px] p-5 sm:p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="inline-flex items-center gap-2 text-xs og-medium text-[#d0ff45]">
-            <Calendar className="w-4 h-4" />
-            <span>Active Household Rotation Cycle (1 to 7 Days)</span>
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+      className="space-y-5"
+    >
+      {/* 1. Turn Rotation Queue & 1-7 Day Cycle Card */}
+      <div className="bento-stat-card rounded-[28px] p-5 sm:p-6 space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg sm:text-xl og-bold text-white">Turn Rotation Queue</h2>
+            <p className="text-xs text-zinc-400">
+              {party.name} · {party.members.length} Roommates
+            </p>
           </div>
-          <h3 className="text-lg og-bold text-white">
-            Current Schedule: {formatRotationDaysLabel(party.rotationIntervalHours)}
-          </h3>
-          <p className="text-xs og-light text-zinc-400">
-            Select how many days each roommate has for their trash turn before rotating (1 Day up to 7 Days).
-          </p>
+
+          <div className="flex items-center gap-2">
+            {onNudgeActiveAssignee && (
+              <motion.button
+                type="button"
+                whileTap={{ scale: 0.95 }}
+                onClick={onNudgeActiveAssignee}
+                data-testid="hud-mail-warning-btn"
+                className="px-3.5 py-2 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-xs og-medium text-zinc-200 flex items-center gap-1.5"
+              >
+                <BellRing className="w-3.5 h-3.5 text-[#c8ff2e]" />
+                <span>Nudge Duty</span>
+              </motion.button>
+            )}
+            {isHostOrAdmin && onHostSkipTurn && (
+              <motion.button
+                type="button"
+                whileTap={{ scale: 0.95 }}
+                onClick={onHostSkipTurn}
+                className="px-3.5 py-2 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-xs og-medium text-zinc-200 flex items-center gap-1.5"
+              >
+                <SkipForward className="w-3.5 h-3.5 text-[#c8ff2e]" />
+                <span>Rotate Turn</span>
+              </motion.button>
+            )}
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {ROTATION_DAY_OPTIONS.map((opt) => {
-            const isActive = party.rotationIntervalHours === opt.hours;
+        <div className="space-y-2.5">
+          {party.members.map((member: HouseholdMember, index: number) => {
+            const offset =
+              (index - party.currentTurnIndex + party.members.length) %
+              party.members.length;
+            const isUpNow = offset === 0;
+            const isUpNext = offset === 1;
+            const isMe = member.uid === currentUserId;
+
             return (
-              <button
-                key={opt.days}
-                type="button"
-                data-testid={`party-rotation-day-${opt.days}`}
-                onClick={() => handleChangePartyRotationDays(opt.hours)}
-                className={`px-3.5 py-2 rounded-2xl text-xs og-bold transition-all border ${
-                  isActive
-                    ? 'bg-[#d0ff45] text-[#041206] border-[#d0ff45] scale-105 shadow-md'
-                    : 'bg-[#081a0a] text-zinc-300 border-white/10 hover:border-[#d0ff45]/40 hover:text-white'
+              <div
+                key={member.uid}
+                className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 transition-colors ${
+                  isUpNow
+                    ? 'bg-[#c8ff2e]/12 border-[#c8ff2e]/40'
+                    : 'bg-[#0a180c] border-white/[0.06]'
                 }`}
               >
-                {opt.days} {opt.days === 1 ? 'Day' : 'Days'}
-              </button>
+                <div className="flex items-center gap-3 min-w-0">
+                  <MemberAvatar member={member} size="md" highlightRing={isUpNow} />
+                  <div className="min-w-0">
+                    <p className="text-sm og-bold text-white truncate">
+                      {member.displayName} {isMe && '(You)'}{' '}
+                      {member.role === 'HOST' && (
+                        <span className="text-xs og-book text-[#c8ff2e]">· Host</span>
+                      )}
+                    </p>
+                    <p className="text-[11px] text-zinc-400 font-mono truncate">
+                      {member.email}
+                    </p>
+                    <p className="text-[11px] text-zinc-500 font-mono tabular-nums">
+                      {member.points} pts · {member.onTimeDrops} on-time · {member.missedDrops} missed
+                    </p>
+                  </div>
+                </div>
+
+                <div className="text-right shrink-0">
+                  {isUpNow ? (
+                    <span className="px-3 py-1 rounded-full bg-[#c8ff2e] text-[#051807] text-xs og-bold">
+                      Up Now
+                    </span>
+                  ) : isUpNext ? (
+                    <span className="text-xs og-medium text-zinc-300">Up Next</span>
+                  ) : (
+                    <span className="text-xs font-mono text-zinc-500 tabular-nums">
+                      In {offset} turns
+                    </span>
+                  )}
+                </div>
+              </div>
             );
           })}
+        </div>
+
+        {/* 1-to-7 Day Cycle Selector */}
+        <div className="pt-4 border-t border-white/[0.08] space-y-3">
+          <div className="flex items-center justify-between text-xs">
+            <span className="inline-flex items-center gap-1.5 og-medium text-zinc-300">
+              <Calendar className="w-3.5 h-3.5 text-[#c8ff2e]" />
+              <span>Rotation Cycle (1 to 7 Days):</span>
+            </span>
+            <span
+              data-testid="active-rotation-days-label"
+              className="font-mono og-bold text-[#c8ff2e]"
+            >
+              {formatRotationDaysLabel(party.rotationIntervalHours)}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-7 gap-1.5">
+            {ROTATION_DAY_OPTIONS.map((opt) => {
+              const isSelected = party.rotationIntervalHours === opt.hours;
+              return (
+                <motion.button
+                  key={opt.days}
+                  type="button"
+                  whileTap={{ scale: 0.93 }}
+                  data-testid={`party-rotation-day-${opt.days}`}
+                  onClick={() => handleChangePartyRotationDays(opt.hours)}
+                  className={`py-2 rounded-xl text-xs og-bold transition-colors border ${
+                    isSelected
+                      ? 'bg-[#c8ff2e] text-[#051807] border-[#c8ff2e]'
+                      : 'bg-[#09190b] text-zinc-300 border-white/10 hover:border-[#c8ff2e]/40'
+                  }`}
+                >
+                  {opt.shortLabel}
+                </motion.button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
       {rotationBanner && (
-        <div className="p-3.5 rounded-2xl bg-[#d0ff45]/15 border border-[#d0ff45]/40 text-[#d0ff45] text-xs og-medium text-center">
+        <div className="p-3.5 rounded-2xl bg-[#c8ff2e]/15 border border-[#c8ff2e]/40 text-[#c8ff2e] text-xs og-medium text-center">
           {rotationBanner}
         </div>
       )}
 
-      {/* Top 2-Column Split: 6-Slot Invite Code Showcase + Add Roommate by Email */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+      {/* 2. Top 2-Column Split: 6-Slot Invite Code Showcase + Invite Roommate by Email */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         {/* Left 6 Cols: 6-Box Invite Code Showcase */}
-        <div className="lg:col-span-6 glass-panel-elevated rounded-[32px] p-6 sm:p-8 flex flex-col justify-between space-y-6 text-center">
-          <div className="flex items-center justify-between text-xs og-book text-zinc-400">
-            <span>
-              {party.members.length} Registered Members ·{' '}
-              {formatRotationDaysLabel(party.rotationIntervalHours)}
-            </span>
-            <span className="font-mono text-[#d0ff45]">Host: {party.hostEmail}</span>
+        <div className="lg:col-span-6 bento-stat-card rounded-[28px] p-5 sm:p-6 flex flex-col justify-between space-y-5 text-center">
+          <div className="flex items-center justify-between text-xs text-zinc-400">
+            <span>6-Character Invite Code</span>
+            <span className="font-mono text-[#c8ff2e]">Host: {party.hostEmail}</span>
           </div>
 
-          <div className="space-y-2">
-            <p className="text-xs og-light text-zinc-400">
-              Share this 6-Character Household Invite Code with your roommates
-            </p>
-            <h2 className="text-2xl sm:text-3xl og-bold text-white tracking-tight">
+          <div className="space-y-1">
+            <h3 className="text-xl sm:text-2xl og-bold text-white tracking-tight">
               {party.name}
-            </h2>
+            </h3>
             <p
               data-testid="active-invite-code"
-              className="text-sm font-mono og-bold text-[#d0ff45]"
+              className="text-xs font-mono og-bold text-[#c8ff2e]"
             >
               {formattedInviteCode}
             </p>
           </div>
 
           {/* 6-Digit/Char Rounded Code Boxes (3 chars + hyphen + 3 chars) */}
-          <div className="flex items-center justify-center gap-1.5 sm:gap-2.5 py-2">
+          <div className="flex items-center justify-center gap-1.5 sm:gap-2 py-1">
             {sixCharSlots.map((char, index) => (
               <React.Fragment key={`${char}-${index}`}>
                 {index === 3 && (
-                  <span className="text-zinc-500 font-mono og-bold text-lg select-none">
+                  <span className="text-zinc-500 font-mono og-bold text-base select-none">
                     -
                   </span>
                 )}
-                <div className="animate-tile-pop w-11 h-13 sm:w-12 sm:h-14 rounded-2xl bg-[#091c0b] border border-[#d0ff45]/35 flex items-center justify-center text-lg sm:text-xl og-bold font-mono text-[#d0ff45] shadow-inner">
+                <div className="w-10 h-12 sm:w-11 sm:h-13 rounded-2xl bg-[#09190b] border border-[#c8ff2e]/35 flex items-center justify-center text-base sm:text-lg og-bold font-mono text-[#c8ff2e]">
                   {char}
                 </div>
               </React.Fragment>
             ))}
           </div>
 
-          <p className="text-xs og-light text-zinc-400">
-            Roommates can log into their account on PC or phone and enter{' '}
-            <span className="text-[#d0ff45] font-mono og-bold">{formattedInviteCode}</span>{' '}
-            (6 characters) to join this household party immediately.
+          <p className="text-xs text-zinc-400">
+            Roommates can enter{' '}
+            <span className="text-[#c8ff2e] font-mono og-bold">{formattedInviteCode}</span>{' '}
+            on their phone or PC to join this household immediately.
           </p>
 
-          <button
+          <motion.button
             type="button"
+            whileTap={{ scale: 0.96 }}
             onClick={handleCopyInviteCode}
             className="lime-cta w-full py-3.5 px-6 rounded-full og-bold text-sm flex items-center justify-center gap-2 min-h-[48px]"
           >
@@ -322,91 +422,75 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
             ) : (
               <>
                 <Copy className="w-4 h-4" />
-                <span>Copy 6-Character Code ({formattedInviteCode})</span>
+                <span>Copy Code ({formattedInviteCode})</span>
               </>
             )}
-          </button>
+          </motion.button>
         </div>
 
         {/* Right 6 Cols: Invite Roommate with Account Email */}
         <form
           onSubmit={handleAddRoommateSubmit}
-          className="lg:col-span-6 glass-panel rounded-[32px] p-6 sm:p-8 flex flex-col justify-between space-y-6"
+          className="lg:col-span-6 bento-stat-card rounded-[28px] p-5 sm:p-6 flex flex-col justify-between space-y-4"
         >
-          <div className="space-y-2 text-center sm:text-left">
-            <div className="inline-flex items-center gap-2 text-xs og-medium text-[#d0ff45]">
+          <div className="space-y-1">
+            <div className="inline-flex items-center gap-1.5 text-xs og-medium text-[#c8ff2e]">
               <UserPlus className="w-4 h-4" />
-              <span>Send Household Invitation to Roommate&apos;s Invitations Tab</span>
+              <span>Direct Email Invite</span>
             </div>
-            <h3 className="text-2xl og-bold text-white tracking-tight">
+            <h3 className="text-xl og-bold text-white tracking-tight">
               Invite Roommate by Email
             </h3>
-            <p className="text-xs sm:text-sm og-light text-zinc-400 leading-relaxed">
-              Enter your roommate&apos;s name and email address. They will receive a live pop-up alert and see an invite card from you inside their <strong className="text-[#d0ff45]">Invitations</strong> tab to join <strong className="text-white">{party.name}</strong> in one tap.
+            <p className="text-xs text-zinc-400">
+              Sends a one-tap invite card directly to their Invitations tab.
             </p>
           </div>
 
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <label
-                htmlFor="join-member-name"
-                className="block text-xs og-medium text-white pl-1"
-              >
-                Roommate Display Name
-              </label>
-              <input
-                id="join-member-name"
-                type="text"
-                value={roommateName}
-                onChange={(e) => setRoommateName(e.target.value)}
-                placeholder="e.g. Jordan Lee"
-                className="pill-input w-full px-5 py-3.5 rounded-full text-sm og-regular text-white placeholder:text-zinc-500"
-              />
-            </div>
+          <div className="space-y-3">
+            <input
+              id="join-member-name"
+              type="text"
+              value={roommateName}
+              onChange={(e) => setRoommateName(e.target.value)}
+              placeholder="Roommate display name (e.g. Jordan)"
+              className="pill-input w-full px-4 py-3 rounded-full text-xs sm:text-sm text-white placeholder:text-zinc-500"
+            />
 
-            <div className="space-y-1.5">
-              <label
-                htmlFor="join-member-email"
-                className="block text-xs og-medium text-white pl-1"
-              >
-                Roommate Account Email (Deliver to Their Invitations Tab)
-              </label>
-              <div className="relative flex items-center">
-                <Mail className="w-4 h-4 text-zinc-400 absolute left-4 pointer-events-none" />
-                <input
-                  id="join-member-email"
-                  type="email"
-                  value={roommateEmail}
-                  onChange={(e) => setRoommateEmail(e.target.value)}
-                  placeholder="e.g. jordan@gmail.com"
-                  className="pill-input w-full pl-11 pr-5 py-3.5 rounded-full text-sm og-regular text-white placeholder:text-zinc-500"
-                />
-              </div>
+            <div className="relative flex items-center">
+              <Mail className="w-4 h-4 text-zinc-400 absolute left-4 pointer-events-none" />
+              <input
+                id="join-member-email"
+                type="email"
+                value={roommateEmail}
+                onChange={(e) => setRoommateEmail(e.target.value)}
+                placeholder="Roommate email (e.g. jordan@gmail.com)"
+                className="pill-input w-full pl-11 pr-4 py-3 rounded-full text-xs sm:text-sm text-white placeholder:text-zinc-500"
+              />
             </div>
           </div>
 
           {addError && <p className="text-xs text-rose-400 og-medium">{addError}</p>}
-          {addSuccess && <p className="text-xs text-[#d0ff45] og-medium">{addSuccess}</p>}
+          {addSuccess && <p className="text-xs text-[#c8ff2e] og-medium">{addSuccess}</p>}
 
           {partyInvitations.length > 0 && (
-            <div className="p-3.5 rounded-2xl bg-[#071809] border border-white/10 space-y-2">
-              <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
-                Sent Email Invitations ({partyInvitations.length})
+            <div className="p-3 rounded-2xl bg-[#071809] border border-white/10 space-y-1.5">
+              <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">
+                Sent Invitations ({partyInvitations.length})
               </p>
-              <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1">
+              <div className="space-y-1 max-h-24 overflow-y-auto pr-1">
                 {partyInvitations.map((inv) => (
                   <div
                     key={inv.id}
-                    className="flex items-center justify-between gap-2 text-xs py-1 px-2.5 rounded-xl bg-white/[0.03]"
+                    className="flex items-center justify-between gap-2 text-xs py-1 px-2 rounded-xl bg-white/[0.03]"
                   >
-                    <div className="min-w-0">
+                    <div className="min-w-0 truncate">
                       <span className="og-medium text-white">{inv.invitedName}</span>{' '}
                       <span className="text-zinc-400 font-mono text-[11px]">({inv.invitedEmail})</span>
                     </div>
                     <span
                       className={`px-2 py-0.5 rounded-md text-[10px] font-mono og-bold shrink-0 ${
                         inv.status === 'ACCEPTED'
-                          ? 'bg-[#d0ff45]/20 text-[#d0ff45]'
+                          ? 'bg-[#c8ff2e]/20 text-[#c8ff2e]'
                           : inv.status === 'DECLINED'
                           ? 'bg-rose-500/20 text-rose-300'
                           : 'bg-amber-400/20 text-amber-300'
@@ -420,75 +504,24 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
             </div>
           )}
 
-          <button
+          <motion.button
             type="submit"
+            whileTap={{ scale: 0.96 }}
             disabled={isAdding}
             data-testid="add-roommate-submit"
             className="lime-cta w-full py-3.5 px-6 rounded-full og-bold text-sm flex items-center justify-center gap-2 min-h-[48px]"
           >
             <span>{isAdding ? 'Sending Invitation...' : 'Send Household Invitation'}</span>
             <ArrowRight className="w-4 h-4" />
-          </button>
+          </motion.button>
         </form>
       </div>
 
-      {/* Bottom 2-Column Split: Registered Household Roster + Switch/Create Household */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Registered Household Roster */}
-        <div className="lg:col-span-7 glass-panel rounded-[32px] p-6 sm:p-8 space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-lg og-bold text-white">Registered Household Roster</h3>
-              <p className="text-xs og-light text-zinc-400">
-                Real member accounts &amp; email addresses synced across PC and mobile
-              </p>
-            </div>
-            <Users className="w-5 h-5 text-[#d0ff45]" />
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {party.members.map((member: HouseholdMember, idx: number) => {
-              const isMe = member.uid === currentUserId;
-              const isCurrentTurn = member.uid === party.currentTurnUserId;
-              return (
-                <div
-                  key={member.uid}
-                  className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 ${
-                    isCurrentTurn
-                      ? 'bg-[#d0ff45]/12 border-[#d0ff45]/50 text-white'
-                      : 'bg-[#08190a] border-white/[0.07] text-zinc-300'
-                  }`}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <MemberAvatar member={member} size="md" highlightRing={isCurrentTurn} />
-                    <div className="min-w-0">
-                      <p className="text-sm og-bold text-white truncate">
-                        {member.displayName} {isMe && '(You)'}
-                      </p>
-                      <p className="text-[11px] text-zinc-400 font-mono truncate">
-                        {member.email}
-                      </p>
-                      <p className="text-[11px] text-zinc-400 font-mono tabular-nums mt-0.5">
-                        #{idx + 1} · {member.role} · {member.points} pts · {member.onTimeDrops}{' '}
-                        on-time
-                      </p>
-                    </div>
-                  </div>
-                  {isCurrentTurn && (
-                    <span className="text-[11px] og-bold text-[#d0ff45] shrink-0">
-                      Up Now
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Join Another Party by Invite Code OR Create New Household */}
-        <div className="lg:col-span-5 glass-panel rounded-[32px] p-6 sm:p-8 flex flex-col justify-between space-y-6">
-          <form onSubmit={handleJoinByCodeSubmit} className="space-y-3">
-            <div className="inline-flex items-center gap-1.5 text-xs og-medium text-[#d0ff45]">
+      {/* 3. Switch / Create / Leave / Delete Household Controls */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        <div className="lg:col-span-6 bento-stat-card rounded-[28px] p-5 sm:p-6 space-y-4">
+          <form onSubmit={handleJoinByCodeSubmit} className="space-y-2.5">
+            <div className="inline-flex items-center gap-1.5 text-xs og-medium text-[#c8ff2e]">
               <KeyRound className="w-4 h-4" />
               <span>Join Another Household by 6-Char Code</span>
             </div>
@@ -510,203 +543,184 @@ export const PartyManagerView: React.FC<PartyManagerViewProps> = ({
                 }}
                 placeholder="e.g. BIN-7X4"
                 data-testid="party-switch-join-code-input"
-                className="pill-input flex-1 px-4 py-3 rounded-full text-xs font-mono text-white placeholder:text-zinc-500"
+                className="pill-input flex-1 px-4 py-2.5 rounded-full text-xs font-mono text-white placeholder:text-zinc-500"
               />
-              <button
+              <motion.button
                 type="submit"
+                whileTap={{ scale: 0.95 }}
                 data-testid="party-switch-join-btn"
-                className="px-4 py-3 rounded-full bg-[#d0ff45] text-[#041206] og-bold text-xs shrink-0"
+                className="px-5 py-2.5 rounded-full bg-[#c8ff2e] text-[#051807] og-bold text-xs shrink-0"
               >
                 Join
-              </button>
+              </motion.button>
             </div>
             {joinError && <p className="text-xs text-rose-400">{joinError}</p>}
-            {joinSuccess && <p className="text-xs text-[#d0ff45]">{joinSuccess}</p>}
+            {joinSuccess && <p className="text-xs text-[#c8ff2e]">{joinSuccess}</p>}
           </form>
 
           <div className="h-px bg-white/10" />
 
-          <form onSubmit={handleCreateSubmit} className="space-y-3.5">
-            <div className="space-y-1">
-              <div className="inline-flex items-center gap-1.5 text-xs og-medium text-[#d0ff45]">
-                <Home className="w-4 h-4" />
-                <span>Create a New Household Party</span>
-              </div>
-              <p className="text-xs og-light text-zinc-400">
-                Start a fresh household party as Host and choose a 1 to 7 day rotation cycle.
-              </p>
+          <form onSubmit={handleCreateSubmit} className="space-y-3">
+            <div className="inline-flex items-center gap-1.5 text-xs og-medium text-[#c8ff2e]">
+              <Home className="w-4 h-4" />
+              <span>Create a New Household Party</span>
             </div>
-
-            <input
-              id="new-party-name"
-              type="text"
-              value={newPartyName}
-              onChange={(e) => setNewPartyName(e.target.value)}
-              placeholder="e.g., Skyview Loft 12A"
-              className="pill-input w-full px-5 py-3 rounded-full text-xs og-regular text-white placeholder:text-zinc-500"
-            />
-
-            <select
-              id="rotation-interval-select"
-              value={rotationHours}
-              onChange={(e) => setRotationHours(Number(e.target.value))}
-              aria-label="Turn Deadline Schedule"
-              className="pill-input w-full px-5 py-3 rounded-full text-xs og-regular text-white bg-[#091c0b]"
-            >
-              {ROTATION_DAY_OPTIONS.map((opt) => (
-                <option key={opt.days} value={opt.hours}>
-                  {opt.fullLabel}
-                </option>
-              ))}
-            </select>
-
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                id="new-party-name"
+                type="text"
+                value={newPartyName}
+                onChange={(e) => setNewPartyName(e.target.value)}
+                placeholder="New household name..."
+                className="pill-input w-full px-4 py-2.5 rounded-full text-xs text-white placeholder:text-zinc-500"
+              />
+              <select
+                id="rotation-interval-select"
+                value={rotationHours}
+                onChange={(e) => setRotationHours(Number(e.target.value))}
+                aria-label="Turn Deadline Schedule"
+                className="pill-input w-full px-4 py-2.5 rounded-full text-xs text-white bg-[#09190b]"
+              >
+                {ROTATION_DAY_OPTIONS.map((opt) => (
+                  <option key={opt.days} value={opt.hours}>
+                    {opt.fullLabel}
+                  </option>
+                ))}
+              </select>
+            </div>
             {createError && <p className="text-xs text-rose-400 og-medium">{createError}</p>}
             {createSuccess && (
-              <p className="text-xs text-[#d0ff45] og-medium">{createSuccess}</p>
+              <p className="text-xs text-[#c8ff2e] og-medium">{createSuccess}</p>
             )}
-
-            <button
+            <motion.button
               type="submit"
-              className="w-full min-h-[44px] py-3 px-6 rounded-full bg-white/[0.08] hover:bg-white/[0.14] border border-white/10 text-white og-bold text-xs flex items-center justify-center gap-2 transition-colors"
+              whileTap={{ scale: 0.96 }}
+              className="w-full py-2.5 px-5 rounded-full bg-white/[0.08] hover:bg-white/[0.14] border border-white/10 text-white og-bold text-xs flex items-center justify-center gap-1.5"
             >
-              <Plus className="w-4 h-4 text-[#d0ff45]" />
+              <Plus className="w-3.5 h-3.5 text-[#c8ff2e]" />
               <span>Create New Party</span>
-            </button>
+            </motion.button>
           </form>
         </div>
-      </div>
 
-      {/* Household Membership Controls: Leave Party & Delete Party (Host) */}
-      <div className="glass-panel rounded-[32px] p-6 sm:p-8 border border-white/10 space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="inline-flex items-center gap-2 text-xs og-medium text-amber-300">
+        {/* Leave or Delete Party Card */}
+        <div className="lg:col-span-6 bento-stat-card rounded-[28px] p-5 sm:p-6 flex flex-col justify-between space-y-4">
+          <div className="space-y-1.5">
+            <div className="inline-flex items-center gap-1.5 text-xs og-medium text-amber-300">
               <AlertTriangle className="w-4 h-4" />
-              <span>Household Membership &amp; Party Controls</span>
+              <span>Party Membership</span>
             </div>
             <h3 className="text-lg og-bold text-white">
               Leave or Delete &ldquo;{party.name}&rdquo;
             </h3>
-            <p className="text-xs og-light text-zinc-400 max-w-2xl leading-relaxed">
+            <p className="text-xs text-zinc-400 leading-relaxed">
               {isHostOrAdmin
                 ? nextRoommateForHostTransfer
-                  ? `As Party Host, leaving transfers the Host role to ${nextRoommateForHostTransfer.displayName} (${nextRoommateForHostTransfer.email}), or you can permanently delete this household party for all ${party.members.length} members.`
-                  : 'You are currently the only member in this household. Leaving or deleting will close this party and return you to the setup screen.'
-                : 'Leaving removes your account from this household rotation and returns you to the Create / Join Party screen.'}
+                  ? `Leaving transfers Host role to ${nextRoommateForHostTransfer.displayName}, or you can delete this party for everyone.`
+                  : 'You are the only member. Leaving or deleting closes this party.'
+                : 'Leaving removes your account from this household rotation.'}
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2.5">
             {onLeaveParty && (
-              <button
+              <motion.button
                 type="button"
+                whileTap={{ scale: 0.95 }}
                 data-testid="leave-party-trigger-btn"
                 onClick={() => {
                   setActionError(null);
                   setConfirmAction('leave');
                 }}
-                className="px-5 py-3 rounded-full bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/40 text-amber-200 og-bold text-xs flex items-center gap-2 transition-colors"
+                className="px-4 py-2.5 rounded-full bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/40 text-amber-200 og-bold text-xs flex items-center gap-1.5"
               >
-                <LogOut className="w-4 h-4" />
+                <LogOut className="w-3.5 h-3.5" />
                 <span>
                   {isHostOrAdmin && nextRoommateForHostTransfer
                     ? 'Leave & Transfer Host'
-                    : 'Leave Household Party'}
+                    : 'Leave Party'}
                 </span>
-              </button>
+              </motion.button>
             )}
 
             {isHostOrAdmin && onDeleteParty && (
-              <button
+              <motion.button
                 type="button"
+                whileTap={{ scale: 0.95 }}
                 data-testid="delete-party-trigger-btn"
                 onClick={() => {
                   setActionError(null);
                   setConfirmAction('delete');
                 }}
-                className="px-5 py-3 rounded-full bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/50 text-rose-200 og-bold text-xs flex items-center gap-2 transition-colors"
+                className="px-4 py-2.5 rounded-full bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/50 text-rose-200 og-bold text-xs flex items-center gap-1.5"
               >
-                <Trash2 className="w-4 h-4" />
-                <span>Delete Party for Everyone</span>
-              </button>
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Party</span>
+              </motion.button>
             )}
           </div>
-        </div>
 
-        {actionError && (
-          <p className="text-xs text-rose-400 og-medium">{actionError}</p>
-        )}
+          {actionError && <p className="text-xs text-rose-400 og-medium">{actionError}</p>}
 
-        {confirmAction === 'leave' && (
-          <div
-            data-testid="confirm-leave-party-panel"
-            className="p-4 sm:p-5 rounded-2xl bg-amber-950/40 border border-amber-400/45 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-view-enter"
-          >
-            <div className="space-y-1">
-              <p className="text-sm og-bold text-white">
+          {confirmAction === 'leave' && (
+            <div
+              data-testid="confirm-leave-party-panel"
+              className="p-3.5 rounded-2xl bg-amber-950/40 border border-amber-400/45 flex items-center justify-between gap-3 animate-view-enter"
+            >
+              <span className="text-xs og-bold text-white">
                 Confirm leaving &ldquo;{party.name}&rdquo;?
-              </p>
-              <p className="text-xs text-amber-200/90">
-                {isHostOrAdmin && nextRoommateForHostTransfer
-                  ? `Host permissions will automatically transfer to ${nextRoommateForHostTransfer.displayName} (${nextRoommateForHostTransfer.email}).`
-                  : 'You can rejoin anytime using the 6-character household invite code.'}
-              </p>
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setConfirmAction(null)}
+                  className="px-3 py-1.5 rounded-full bg-white/10 text-xs text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isActionPending}
+                  data-testid="confirm-leave-party-btn"
+                  onClick={handleExecuteLeaveParty}
+                  className="px-3.5 py-1.5 rounded-full bg-amber-400 text-[#041206] text-xs og-bold"
+                >
+                  {isActionPending ? 'Leaving...' : 'Yes, Leave'}
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-2.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => setConfirmAction(null)}
-                className="px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/15 text-xs og-medium text-white"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isActionPending}
-                data-testid="confirm-leave-party-btn"
-                onClick={handleExecuteLeaveParty}
-                className="px-5 py-2.5 rounded-full bg-amber-400 hover:bg-amber-300 text-[#041206] text-xs og-bold"
-              >
-                {isActionPending ? 'Leaving...' : 'Yes, Leave Party'}
-              </button>
-            </div>
-          </div>
-        )}
+          )}
 
-        {confirmAction === 'delete' && (
-          <div
-            data-testid="confirm-delete-party-panel"
-            className="p-4 sm:p-5 rounded-2xl bg-rose-950/50 border border-rose-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-view-enter"
-          >
-            <div className="space-y-1">
-              <p className="text-sm og-bold text-white">
-                Permanently delete &ldquo;{party.name}&rdquo; for all {party.members.length} members?
-              </p>
-              <p className="text-xs text-rose-200/90">
-                This dissolves the household party, clears its invite code ({formattedInviteCode}), and returns all members to the Create / Join Party screen.
-              </p>
+          {confirmAction === 'delete' && (
+            <div
+              data-testid="confirm-delete-party-panel"
+              className="p-3.5 rounded-2xl bg-rose-950/50 border border-rose-500/50 flex items-center justify-between gap-3 animate-view-enter"
+            >
+              <span className="text-xs og-bold text-white">
+                Delete &ldquo;{party.name}&rdquo; for all?
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setConfirmAction(null)}
+                  className="px-3 py-1.5 rounded-full bg-white/10 text-xs text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isActionPending}
+                  data-testid="confirm-delete-party-btn"
+                  onClick={handleExecuteDeleteParty}
+                  className="px-3.5 py-1.5 rounded-full bg-rose-500 text-slate-950 text-xs og-bold"
+                >
+                  {isActionPending ? 'Deleting...' : 'Yes, Delete'}
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-2.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => setConfirmAction(null)}
-                className="px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/15 text-xs og-medium text-white"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isActionPending}
-                data-testid="confirm-delete-party-btn"
-                onClick={handleExecuteDeleteParty}
-                className="px-5 py-2.5 rounded-full bg-rose-500 hover:bg-rose-400 text-slate-950 text-xs og-bold"
-              >
-                {isActionPending ? 'Deleting Party...' : 'Yes, Delete Party'}
-              </button>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
+    </motion.div>
   );
 };

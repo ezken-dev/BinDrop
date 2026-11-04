@@ -16,7 +16,7 @@ import {
   BellRing,
   Sparkles,
 } from 'lucide-react';
-import { compressUploadedImage } from '../utils/sceneImageGenerator';
+import { compressAvatarImage } from '../utils/sceneImageGenerator';
 import {
   OFFICIAL_BINDROP_EMAIL,
   ROTATION_DAY_OPTIONS,
@@ -118,7 +118,7 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const compressed = await compressUploadedImage(file);
+      const compressed = await compressAvatarImage(file);
       setPhotoURL(compressed.dataUrl);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Could not process image.');
@@ -420,7 +420,6 @@ export const AuthLoginScreen: React.FC<AuthLoginScreenProps> = ({
                       Due in {opt.days === 1 ? '1 Day (24h)' : `${opt.days} Days (${opt.hours}h)`}
                     </option>
                   ))}
-                  <option value={4.5}>Due in 4h 30m (Triggers 5h Warning Pop-Up)</option>
                 </select>
               </div>
 

@@ -30,6 +30,7 @@ import {
   type TrashDropLog,
   type TurnHistoryRecord,
 } from '../utils/trashDutyLogic';
+import { generateSimulatedTrashSceneDataUrl } from '../utils/sceneImageGenerator';
 import { MemberAvatar } from './MemberAvatar';
 
 interface AdminDashboardViewProps {
@@ -290,26 +291,79 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     }
   };
 
+  const sortedLeaderboard = useMemo(
+    () => [...party.members].sort((a, b) => b.points - a.points),
+    [party.members]
+  );
+
   return (
-    <div className="animate-view-enter space-y-6">
+    <div className="animate-view-enter space-y-5">
+      {/* Household Standings Leaderboard Card */}
+      <div className="bento-stat-card rounded-[28px] p-5 sm:p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg sm:text-xl og-bold text-white">Household Standings</h2>
+            <p className="text-xs text-zinc-400">
+              {party.name} · Ranked by Host-verified trash disposal points
+            </p>
+          </div>
+          <span className="px-3 py-1 rounded-full bg-[#c8ff2e]/15 border border-[#c8ff2e]/35 text-xs font-mono og-bold text-[#c8ff2e]">
+            {party.totalPartyDrops} Total Cycles
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {sortedLeaderboard.map((member, idx) => (
+            <div
+              key={member.uid}
+              className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 ${
+                idx === 0
+                  ? 'bg-[#c8ff2e]/10 border-[#c8ff2e]/40'
+                  : 'bg-[#09190b] border-white/[0.07]'
+              }`}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="font-mono og-bold text-xs text-[#c8ff2e] w-5">
+                  #{idx + 1}
+                </span>
+                <MemberAvatar member={member} size="sm" highlightRing={idx === 0} />
+                <div className="min-w-0">
+                  <p className="text-xs sm:text-sm og-bold text-white truncate">
+                    {member.displayName}
+                  </p>
+                  <p className="text-[11px] text-zinc-400 font-mono truncate">
+                    {member.onTimeDrops} on-time · {member.missedDrops} missed
+                  </p>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <span className="text-sm og-bold font-mono text-[#c8ff2e] tabular-nums">
+                  {member.points} pts
+                </span>
+                <span className="block text-[10px] text-zinc-400 font-mono">
+                  {member.currentStreak}x streak
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Top Admin Header & Sub-Navigation */}
-      <div className="glass-panel-elevated rounded-[32px] p-6 sm:p-8 space-y-6">
+      <div className="bento-stat-card rounded-[28px] p-5 sm:p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="space-y-1">
-            <div className="inline-flex items-center gap-2 text-xs og-medium text-[#d0ff45]">
+            <div className="inline-flex items-center gap-2 text-xs og-medium text-[#c8ff2e]">
               <ShieldCheck className="w-4 h-4" />
               <span>
                 {isHostOrAdmin
-                  ? `Host Admin & Photo Verification · ${party.name}`
-                  : `Household Compliance & History · ${party.name}`}
+                  ? `Host Verification & History · ${party.name}`
+                  : `Household Photo Verification & History`}
               </span>
             </div>
-            <h1 className="text-2xl sm:text-3xl og-bold text-white tracking-tight">
-              Admin Photo Verification, History &amp; Live Pop-Up Alerts
+            <h1 className="text-xl sm:text-2xl og-bold text-white tracking-tight">
+              Trash Photo Database &amp; Duty History
             </h1>
-            <p className="text-xs sm:text-sm og-light text-zinc-400">
-              Review and verify roommate trash photos by date and time, track who completed on time or missed their deadline, and send instant Facebook/Instagram-style pop-up notifications.
-            </p>
           </div>
 
           {/* 3 Section Pills */}
@@ -521,12 +575,28 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           <button
                             type="button"
                             onClick={() => setSelectedDropModal(drop)}
-                            className="relative w-20 h-14 rounded-xl overflow-hidden border border-white/15 group block"
+                            className="relative w-20 h-14 rounded-xl overflow-hidden border border-white/15 group block bg-[#041206]"
                           >
                             <img
-                              src={drop.imageUrl}
+                              src={
+                                drop.imageUrl ||
+                                generateSimulatedTrashSceneDataUrl({
+                                  memberName: drop.userDisplayName,
+                                  variant: 'valid_bag_in_bin',
+                                })
+                              }
                               alt={`Trash drop by ${drop.userDisplayName}`}
                               referrerPolicy="no-referrer"
+                              onError={(e) => {
+                                const target = e.currentTarget;
+                                if (!target.dataset.fallbackApplied) {
+                                  target.dataset.fallbackApplied = 'true';
+                                  target.src = generateSimulatedTrashSceneDataUrl({
+                                    memberName: drop.userDisplayName,
+                                    variant: 'valid_bag_in_bin',
+                                  });
+                                }
+                              }}
                               className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                             />
                           </button>
@@ -774,6 +844,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                               src={rec.imageUrl}
                               alt={rec.userDisplayName}
                               referrerPolicy="no-referrer"
+                              onError={(e) => {
+                                const target = e.currentTarget;
+                                if (!target.dataset.fallbackApplied) {
+                                  target.dataset.fallbackApplied = 'true';
+                                  target.src = generateSimulatedTrashSceneDataUrl({
+                                    memberName: rec.userDisplayName,
+                                    variant: 'valid_bag_in_bin',
+                                  });
+                                }
+                              }}
                               className="w-12 h-12 rounded-xl object-cover border border-white/10 shrink-0"
                             />
                           )}
@@ -968,7 +1048,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               <span className="text-xs og-medium text-white block">
                 Host: Adjust Active Turn Deadline Window (1 to 7 Days)
               </span>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => handleSetDeadlineOffsetHours(24)}
@@ -996,22 +1076,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   className="py-2.5 px-3 rounded-2xl bg-[#091c0b] hover:bg-[#112914] border border-white/10 text-xs text-zinc-200 og-medium"
                 >
                   Set 7 Days (168h)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSetDeadlineOffsetHours(4.5)}
-                  data-testid="trigger-5h-warning-window-btn"
-                  className="py-2.5 px-3 rounded-2xl bg-[#091c0b] hover:bg-[#112914] border border-[#d0ff45]/30 text-xs text-[#d0ff45] og-medium"
-                >
-                  Set 4h 30m (&lt;5h Pop-Up)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSetDeadlineOffsetHours(-0.25)}
-                  data-testid="mark-deadline-overdue-btn"
-                  className="py-2.5 px-3 rounded-2xl bg-rose-950/40 hover:bg-rose-950/60 border border-rose-500/40 text-xs text-rose-300 og-medium"
-                >
-                  Expire Deadline Now
                 </button>
               </div>
             </div>
@@ -1233,9 +1297,25 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
             <div className="rounded-2xl overflow-hidden bg-black border border-white/10 max-h-80">
               <img
-                src={selectedDropModal.imageUrl}
+                src={
+                  selectedDropModal.imageUrl ||
+                  generateSimulatedTrashSceneDataUrl({
+                    memberName: selectedDropModal.userDisplayName,
+                    variant: 'valid_bag_in_bin',
+                  })
+                }
                 alt={`Trash drop by ${selectedDropModal.userDisplayName}`}
                 referrerPolicy="no-referrer"
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (!target.dataset.fallbackApplied) {
+                    target.dataset.fallbackApplied = 'true';
+                    target.src = generateSimulatedTrashSceneDataUrl({
+                      memberName: selectedDropModal.userDisplayName,
+                      variant: 'valid_bag_in_bin',
+                    });
+                  }
+                }}
                 className="w-full h-full object-contain max-h-80"
               />
             </div>

@@ -309,16 +309,19 @@ async function fetchCloudRestWithTimeout(
   }
 }
 
+let serverFirestoreQuotaCooldownUntil = 0;
+
 async function writeCloudFirestoreRestDoc(
   docId: string,
   kind: 'GLOBAL_INDEX' | 'PARTY_BUNDLE' | 'INVITE_CODE' | 'INVITATIONS' | 'PUSH_SUBS',
   payload: unknown
 ): Promise<void> {
+  if (Date.now() < serverFirestoreQuotaCooldownUntil) return;
   const safeId = docId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
   const payloadJson = JSON.stringify(payload);
   if (payloadJson.length > 940000) return;
   try {
-    await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
+    const res = await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -330,15 +333,23 @@ async function writeCloudFirestoreRestDoc(
         },
       }),
     });
+    if (res && res.status === 429) {
+      serverFirestoreQuotaCooldownUntil = Date.now() + 60 * 60 * 1000;
+    }
   } catch {
     // ignore transient network errors
   }
 }
 
 async function readCloudFirestoreRestDoc<T = any>(docId: string): Promise<T | null> {
+  if (Date.now() < serverFirestoreQuotaCooldownUntil) return null;
   const safeId = docId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
   try {
     const res = await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`);
+    if (res && res.status === 429) {
+      serverFirestoreQuotaCooldownUntil = Date.now() + 60 * 60 * 1000;
+      return null;
+    }
     if (!res || !res.ok) return null;
     const data = (await res.json()) as any;
     const raw = data?.fields?.payloadJson?.stringValue;
@@ -352,11 +363,15 @@ async function readCloudFirestoreRestDoc<T = any>(docId: string): Promise<T | nu
 }
 
 async function deleteCloudFirestoreRestDoc(docId: string): Promise<void> {
+  if (Date.now() < serverFirestoreQuotaCooldownUntil) return;
   const safeId = docId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
   try {
-    await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
+    const res = await fetchCloudRestWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
       method: 'DELETE',
     });
+    if (res && res.status === 429) {
+      serverFirestoreQuotaCooldownUntil = Date.now() + 60 * 60 * 1000;
+    }
   } catch {
     // ignore
   }
@@ -2701,7 +2716,7 @@ async function startServer() {
       });
 
       saveStore();
-      pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
+      await pushPartyStoreToCloud(store as any, partyId, { forceWrite: true });
       return res.json({
         drop: verifiedDrop,
         bundle: await buildPartyBundle(partyId),
@@ -2750,7 +2765,7 @@ async function startServer() {
     });
 
     saveStore();
-    pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
+    await pushPartyStoreToCloud(store as any, partyId, { forceWrite: true });
     return res.json({
       drop: pendingDrop,
       bundle: await buildPartyBundle(partyId),
@@ -2917,7 +2932,7 @@ async function startServer() {
     }
 
     saveStore();
-    pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
+    await pushPartyStoreToCloud(store as any, partyId, { forceWrite: true });
     return res.json({
       drop: targetDrop,
       bundle: await buildPartyBundle(partyId),
@@ -3030,7 +3045,7 @@ async function startServer() {
 
     for (const key of Object.keys(store.accounts)) {
       const acc = store.accounts[key];
-      if (acc.uid === uid) {
+      if (acc.uid === uid || (cleanEmail && acc.email.toLowerCase() === cleanEmail)) {
         acc.displayName = cleanName;
         if (photoURL !== undefined) acc.photoURL = photoURL;
         if (cleanEmail && cleanEmail !== key) {
@@ -3043,10 +3058,27 @@ async function startServer() {
       }
     }
 
-    if (partyId && store.parties[partyId]) {
-      const party = store.parties[partyId];
+    // Update the member's profile across the active party (and any other party where they appear)
+    const targetPartyIds = new Set<string>();
+    if (partyId && store.parties[partyId]) targetPartyIds.add(partyId);
+    for (const [pid, p] of Object.entries(store.parties)) {
+      if (
+        p &&
+        p.members.some(
+          (m) => m.uid === uid || (cleanEmail && m.email.toLowerCase() === cleanEmail)
+        )
+      ) {
+        targetPartyIds.add(pid);
+      }
+    }
+
+    for (const pid of targetPartyIds) {
+      const party = store.parties[pid];
+      if (!party) continue;
       party.members = party.members.map((m) => {
-        if (m.uid !== uid) return m;
+        if (m.uid !== uid && (!cleanEmail || m.email.toLowerCase() !== cleanEmail)) {
+          return m;
+        }
         return {
           ...m,
           displayName: cleanName,
@@ -3059,9 +3091,9 @@ async function startServer() {
       }
       party.updatedAt = nowIso;
 
-      if (store.dropsByParty[partyId]) {
-        store.dropsByParty[partyId] = store.dropsByParty[partyId].map((d) =>
-          d.userId === uid
+      if (store.dropsByParty[pid]) {
+        store.dropsByParty[pid] = store.dropsByParty[pid].map((d) =>
+          d.userId === uid || (cleanEmail && d.userEmail.toLowerCase() === cleanEmail)
             ? {
                 ...d,
                 userDisplayName: cleanName,
@@ -3071,9 +3103,33 @@ async function startServer() {
             : d
         );
       }
+
+      if (store.historyByParty[pid]) {
+        store.historyByParty[pid] = store.historyByParty[pid].map((h) =>
+          h.userId === uid || (cleanEmail && h.userEmail.toLowerCase() === cleanEmail)
+            ? {
+                ...h,
+                userDisplayName: cleanName,
+                userEmail: cleanEmail || h.userEmail,
+                userPhotoURL: photoURL !== undefined ? photoURL : h.userPhotoURL,
+              }
+            : h
+        );
+      }
+
+      if (store.alertsByParty[pid] && photoURL !== undefined) {
+        store.alertsByParty[pid] = store.alertsByParty[pid].map((a) =>
+          a.assigneeUserId === uid ? { ...a, senderPhotoURL: photoURL } : a
+        );
+      }
     }
 
     saveStore();
+    for (const pid of targetPartyIds) {
+      await pushPartyStoreToCloud(store as any, pid, { forceWrite: true });
+      syncPartyToCloudFirestoreRest(pid).catch(() => {});
+    }
+
     return res.json({
       bundle: partyId ? await buildPartyBundle(partyId) : null,
     });

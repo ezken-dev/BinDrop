@@ -13,14 +13,40 @@ import {
 
 const FIRESTORE_REST_BASE =
   'https://firestore.googleapis.com/v1/projects/gen-lang-client-0842283767/databases/ai-studio-bindropgamifiedh-242575ad-afb8-49a2-a549-049c420eb6f4/documents/bindrop_cloud';
-const NTFY_TOPIC_PREFIX = 'https://ntfy.sh/bd242575ad_v3_';
-const CLOUD_TIMEOUT_MS = 2200;
-const READ_CACHE_TTL_MS = 4500;
+const NTFY_TOPIC_PREFIX = 'https://ntfy.sh/bd242575ad_v4_';
+const CLOUD_TIMEOUT_MS = 2500;
+const READ_CACHE_TTL_MS = 4000;
+const NTFY_INLINE_CHUNK_SIZE = 2900; // Strictly under ntfy.sh 4,096-byte inline message threshold
+const QUOTA_COOLDOWN_STORAGE_KEY = 'bindrop_fs_quota_cooldown_until';
 
-let firestoreWriteQuotaCooldownUntil = 0;
+let firestoreQuotaCooldownUntil = 0;
+try {
+  if (typeof sessionStorage !== 'undefined') {
+    const saved = Number(sessionStorage.getItem(QUOTA_COOLDOWN_STORAGE_KEY) || '0');
+    if (saved > Date.now()) {
+      firestoreQuotaCooldownUntil = saved;
+    }
+  }
+} catch {
+  // ignore
+}
+
+function markFirestoreQuotaCooldown() {
+  firestoreQuotaCooldownUntil = Date.now() + 60 * 60 * 1000; // 60 minutes cooldown on 429
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem(QUOTA_COOLDOWN_STORAGE_KEY, String(firestoreQuotaCooldownUntil));
+    }
+  } catch {
+    // ignore
+  }
+}
+
 const lastWrittenHashByDocId = new Map<string, string>();
 const readCacheByDocId = new Map<string, { value: any; fetchedAt: number }>();
 const publishedActivePartyIdsInSession = new Set<string>();
+const hydratedDropPhotoCache = new Map<string, string>();
+const hydratedAvatarCache = new Map<string, string>();
 
 export interface CloudSyncStoreLike {
   parties: Record<string, PartyState>;
@@ -41,7 +67,7 @@ export function cleanAlphanumericCode(code: string): string {
 }
 
 function sanitizeDocId(raw: string): string {
-  return raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 56);
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 52);
 }
 
 export function sanitizeEmailForCloudDoc(email?: string | null): string {
@@ -53,21 +79,48 @@ export function sanitizeEmailForCloudDoc(email?: string | null): string {
   return `inv_${clean}`;
 }
 
+export function sanitizeAvatarDocId(email?: string | null): string {
+  const clean = String(email || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_')
+    .slice(0, 42);
+  return `avatar_${clean}`;
+}
+
 /**
- * Strips huge base64 data URLs (>600 chars) from cloud index copies so every
- * party & invite code payload stays < 3KB for instant inline transfer across all devices.
+ * Compacts a party for cloud storage.
+ * For `party_<pid>`, preserves compact member avatars (`<= 7000` chars) inline so all devices
+ * see profile pictures immediately, while `stripAvatarsForIndex: true` strips data URLs in
+ * `code_<6CHAR>` and `global_index` so invite code lookups stay under 2KB.
  */
-export function compactPartyForCloud(party: PartyState): PartyState {
+export function compactPartyForCloud(
+  party: PartyState,
+  options?: { stripAvatarsForIndex?: boolean }
+): PartyState {
+  const maxInlineAvatarLen = options?.stripAvatarsForIndex ? 500 : 7000;
   return {
     ...party,
     inviteCode: formatSixCharInviteCode(party.inviteCode),
-    members: (party.members || []).map((m) => ({
-      ...m,
-      photoURL:
-        m.photoURL && m.photoURL.length > 600 && m.photoURL.startsWith('data:')
-          ? undefined
-          : m.photoURL,
-    })),
+    lastDropImageUrl: undefined,
+    members: (party.members || []).map((m) => {
+      if (m.email && m.photoURL && m.photoURL.length > 60) {
+        hydratedAvatarCache.set(m.email.trim().toLowerCase(), m.photoURL);
+      }
+      const cachedAvatar = m.email
+        ? hydratedAvatarCache.get(m.email.trim().toLowerCase())
+        : undefined;
+      const candidatePhoto = m.photoURL || cachedAvatar;
+      return {
+        ...m,
+        photoURL:
+          candidatePhoto &&
+          candidatePhoto.length > maxInlineAvatarLen &&
+          candidatePhoto.startsWith('data:')
+            ? undefined
+            : candidatePhoto,
+      };
+    }),
   };
 }
 
@@ -128,12 +181,15 @@ async function fetchWithTimeout(
   }
 }
 
-async function readNtfyDoc<T = any>(safeId: string): Promise<{ value: T | null; updatedAtMs: number }> {
+async function readSingleNtfyTopicMessage(topicId: string): Promise<{
+  parsed: any | null;
+  tsMs: number;
+}> {
   try {
-    const res = await fetchWithTimeout(`${NTFY_TOPIC_PREFIX}${safeId}/json?poll=1&since=48h`);
-    if (!res || !res.ok) return { value: null, updatedAtMs: 0 };
+    const res = await fetchWithTimeout(`${NTFY_TOPIC_PREFIX}${topicId}/json?poll=1&since=72h`);
+    if (!res || !res.ok) return { parsed: null, tsMs: 0 };
     const text = (await res.text()).trim();
-    if (!text) return { value: null, updatedAtMs: 0 };
+    if (!text) return { parsed: null, tsMs: 0 };
 
     const lines = text.split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -143,44 +199,144 @@ async function readNtfyDoc<T = any>(safeId: string): Promise<{ value: T | null; 
         const evt = JSON.parse(line);
         if (evt.event !== 'message') continue;
         const tsMs = (Number(evt.time) || 0) * 1000;
-
-        let rawPayloadStr: string | null = null;
-        if (evt.attachment?.url) {
-          const attRes = await fetchWithTimeout(String(evt.attachment.url));
-          if (attRes && attRes.ok) {
-            rawPayloadStr = await attRes.text();
-          }
-        } else if (typeof evt.message === 'string' && evt.message.trim().startsWith('{')) {
-          rawPayloadStr = evt.message;
-        }
-
-        if (rawPayloadStr) {
-          const parsedWrapper = JSON.parse(rawPayloadStr);
-          if (parsedWrapper && parsedWrapper.__deleted === true) {
-            return { value: null, updatedAtMs: tsMs };
-          }
-          if (parsedWrapper && parsedWrapper.payload !== undefined) {
-            const updatedMs = parsedWrapper.updatedAtIso
-              ? new Date(parsedWrapper.updatedAtIso).getTime()
-              : tsMs;
-            return { value: parsedWrapper.payload as T, updatedAtMs: updatedMs };
-          }
-          return { value: parsedWrapper as T, updatedAtMs: tsMs };
+        if (typeof evt.message === 'string' && evt.message.trim().startsWith('{')) {
+          return { parsed: JSON.parse(evt.message), tsMs };
         }
       } catch {
-        // try earlier message
+        // try earlier line
       }
     }
   } catch {
-    // ignore network errors
+    // ignore
   }
-  return { value: null, updatedAtMs: 0 };
+  return { parsed: null, tsMs: 0 };
 }
 
-async function readFirestoreDoc<T = any>(safeId: string): Promise<{ value: T | null; updatedAtMs: number }> {
+async function readNtfyDoc<T = any>(
+  safeId: string
+): Promise<{ value: T | null; updatedAtMs: number }> {
+  try {
+    const { parsed: parsedWrapper, tsMs } = await readSingleNtfyTopicMessage(safeId);
+    if (!parsedWrapper) return { value: null, updatedAtMs: 0 };
+
+    if (parsedWrapper.__deleted === true) {
+      return { value: null, updatedAtMs: tsMs };
+    }
+
+    // Reassemble multi-chunk inline payload if chunked (avoids ntfy.sh 4096-byte attachment CORS block)
+    if (
+      parsedWrapper.__chunked === true &&
+      typeof parsedWrapper.chunkCount === 'number' &&
+      parsedWrapper.chunkCount > 0
+    ) {
+      const count = Math.min(20, parsedWrapper.chunkCount);
+      const chunkResults = await Promise.all(
+        Array.from({ length: count }, (_, idx) =>
+          readSingleNtfyTopicMessage(`${safeId}_c${idx}`)
+        )
+      );
+      const pieces: string[] = [];
+      for (let idx = 0; idx < count; idx++) {
+        const chunkObj = chunkResults[idx]?.parsed;
+        if (!chunkObj || typeof chunkObj.data !== 'string') {
+          return { value: null, updatedAtMs: 0 };
+        }
+        pieces.push(chunkObj.data);
+      }
+      const fullPayloadJson = pieces.join('');
+      const reconstructed = JSON.parse(fullPayloadJson) as T;
+      const updatedMs = parsedWrapper.updatedAtIso
+        ? new Date(parsedWrapper.updatedAtIso).getTime()
+        : tsMs;
+      return { value: reconstructed, updatedAtMs: updatedMs };
+    }
+
+    if (parsedWrapper.payload !== undefined) {
+      const updatedMs = parsedWrapper.updatedAtIso
+        ? new Date(parsedWrapper.updatedAtIso).getTime()
+        : tsMs;
+      return { value: parsedWrapper.payload as T, updatedAtMs: updatedMs };
+    }
+
+    return { value: parsedWrapper as T, updatedAtMs: tsMs };
+  } catch {
+    return { value: null, updatedAtMs: 0 };
+  }
+}
+
+async function writeNtfyDoc(
+  safeId: string,
+  kind: string,
+  payload: unknown,
+  nowIso: string
+): Promise<void> {
+  const inlineWrapper = JSON.stringify({
+    docId: safeId,
+    kind,
+    updatedAtIso: nowIso,
+    payload,
+  });
+
+  // If <= 3,500 bytes, post directly as a single inline message (< 4,096 bytes)
+  if (inlineWrapper.length <= 3500) {
+    await fetchWithTimeout(`${NTFY_TOPIC_PREFIX}${safeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      body: inlineWrapper,
+    });
+    return;
+  }
+
+  // Otherwise split payloadJson into <= 2,900-byte inline chunks so ntfy NEVER turns it into a CORS-blocked attachment
+  const payloadJson = JSON.stringify(payload);
+  if (payloadJson.length > 55000) return;
+
+  const chunks: string[] = [];
+  for (let offset = 0; offset < payloadJson.length; offset += NTFY_INLINE_CHUNK_SIZE) {
+    chunks.push(payloadJson.slice(offset, offset + NTFY_INLINE_CHUNK_SIZE));
+  }
+
+  await Promise.all(
+    chunks.map((chunkStr, idx) =>
+      fetchWithTimeout(`${NTFY_TOPIC_PREFIX}${safeId}_c${idx}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: JSON.stringify({
+          idx,
+          data: chunkStr,
+          updatedAtIso: nowIso,
+        }),
+      })
+    )
+  );
+
+  await fetchWithTimeout(`${NTFY_TOPIC_PREFIX}${safeId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+    body: JSON.stringify({
+      docId: safeId,
+      kind,
+      __chunked: true,
+      chunkCount: chunks.length,
+      updatedAtIso: nowIso,
+    }),
+  });
+}
+
+async function readFirestoreDoc<T = any>(
+  safeId: string
+): Promise<{ value: T | null; updatedAtMs: number }> {
+  if (Date.now() < firestoreQuotaCooldownUntil) {
+    return { value: null, updatedAtMs: 0 };
+  }
   try {
     const res = await fetchWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`);
-    if (!res || !res.ok) return { value: null, updatedAtMs: 0 };
+    if (!res) return { value: null, updatedAtMs: 0 };
+    if (res.status === 429) {
+      markFirestoreQuotaCooldown();
+      return { value: null, updatedAtMs: 0 };
+    }
+    if (!res.ok) return { value: null, updatedAtMs: 0 };
     const data = (await res.json()) as any;
     const raw = data?.fields?.payloadJson?.stringValue;
     const updatedAtIso = data?.fields?.updatedAtIso?.stringValue;
@@ -224,7 +380,7 @@ export async function readCloudDoc<T = any>(
 
 export async function writeCloudDoc(
   docId: string,
-  kind: 'GLOBAL_INDEX' | 'PARTY_BUNDLE' | 'INVITE_CODE' | 'INVITATIONS' | 'PUSH_SUBS',
+  kind: 'GLOBAL_INDEX' | 'PARTY_BUNDLE' | 'INVITE_CODE' | 'INVITATIONS' | 'PUSH_SUBS' | 'PHOTO_BLOB',
   payload: unknown,
   options?: { forceWrite?: boolean }
 ): Promise<void> {
@@ -241,27 +397,11 @@ export async function writeCloudDoc(
   const nowIso = new Date().toISOString();
   const tasks: Promise<unknown>[] = [];
 
-  // 1. Write to Ntfy Realtime JSON Relay (always available even when Firestore daily quota is exhausted)
-  const ntfyWrapper = JSON.stringify({
-    docId: safeId,
-    kind,
-    updatedAtIso: nowIso,
-    payload,
-  });
-  if (ntfyWrapper.length < 180000) {
-    tasks.push(
-      fetchWithTimeout(`${NTFY_TOPIC_PREFIX}${safeId}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'text/plain;charset=UTF-8',
-        },
-        body: ntfyWrapper,
-      })
-    );
-  }
+  // 1. Write to Ntfy Realtime JSON Relay with automatic inline chunking (< 3.5KB per message)
+  tasks.push(writeNtfyDoc(safeId, kind, payload, nowIso));
 
   // 2. Write to Cloud Firestore REST (unless in 429 quota cooldown)
-  if (Date.now() > firestoreWriteQuotaCooldownUntil) {
+  if (Date.now() > firestoreQuotaCooldownUntil) {
     tasks.push(
       fetchWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
         method: 'PATCH',
@@ -276,7 +416,7 @@ export async function writeCloudDoc(
         }),
       }).then((res) => {
         if (res && res.status === 429) {
-          firestoreWriteQuotaCooldownUntil = Date.now() + 5 * 60 * 1000;
+          markFirestoreQuotaCooldown();
         }
       })
     );
@@ -304,15 +444,159 @@ export async function deleteCloudDoc(docId: string): Promise<void> {
     }),
   ];
 
-  if (Date.now() > firestoreWriteQuotaCooldownUntil) {
+  if (Date.now() > firestoreQuotaCooldownUntil) {
     tasks.push(
       fetchWithTimeout(`${FIRESTORE_REST_BASE}/${safeId}`, {
         method: 'DELETE',
+      }).then((res) => {
+        if (res && res.status === 429) {
+          markFirestoreQuotaCooldown();
+        }
       })
     );
   }
 
   await Promise.allSettled(tasks);
+}
+
+/**
+ * Saves and retrieves full-clarity uploaded trash drop photos in dedicated chunked cloud docs
+ * (`photo_<dropId>`) so photos are NEVER truncated or lost across devices.
+ */
+export async function writeDropPhotoToCloud(
+  dropId: string,
+  imageUrl?: string
+): Promise<void> {
+  if (!dropId || !imageUrl || imageUrl.length < 64) return;
+  hydratedDropPhotoCache.set(dropId, imageUrl);
+  await writeCloudDoc(`photo_${dropId}`, 'PHOTO_BLOB', {
+    dropId,
+    imageUrl,
+  });
+}
+
+export async function hydratePartyDropPhotosFromCloud(
+  store: CloudSyncStoreLike,
+  partyId: string
+): Promise<void> {
+  const drops = store.dropsByParty[partyId] || [];
+  if (drops.length === 0) return;
+
+  await Promise.all(
+    drops.slice(0, 8).map(async (drop) => {
+      if (!drop || !drop.id) return;
+      const existingImg = drop.imageUrl || '';
+      const isCompleteValidImage =
+        existingImg.length > 200 &&
+        (existingImg.startsWith('data:image/') || existingImg.startsWith('http'));
+
+      if (isCompleteValidImage) {
+        hydratedDropPhotoCache.set(drop.id, existingImg);
+        return;
+      }
+
+      const cachedImg = hydratedDropPhotoCache.get(drop.id);
+      if (cachedImg) {
+        drop.imageUrl = cachedImg;
+        return;
+      }
+
+      const photoDoc = await readCloudDoc<{ dropId: string; imageUrl: string }>(
+        `photo_${drop.id}`
+      );
+      if (photoDoc?.imageUrl && photoDoc.imageUrl.length > 100) {
+        hydratedDropPhotoCache.set(drop.id, photoDoc.imageUrl);
+        drop.imageUrl = photoDoc.imageUrl;
+      }
+    })
+  );
+
+  // Also link hydrated drop photos to matching turn history records
+  const historyList = store.historyByParty[partyId] || [];
+  for (const hist of historyList) {
+    if (hist.dropId && (!hist.imageUrl || hist.imageUrl.length < 200)) {
+      const fromCache = hydratedDropPhotoCache.get(hist.dropId);
+      if (fromCache) {
+        hist.imageUrl = fromCache;
+      }
+    }
+  }
+}
+
+/**
+ * Saves and retrieves member profile pictures in dedicated cloud docs (`avatar_<email>`)
+ * so custom uploaded profile photos sync globally across all roommates and devices.
+ */
+export async function writeMemberAvatarToCloud(
+  email?: string | null,
+  photoURL?: string
+): Promise<void> {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail || !photoURL || photoURL.length < 20) return;
+  hydratedAvatarCache.set(cleanEmail, photoURL);
+  await writeCloudDoc(sanitizeAvatarDocId(cleanEmail), 'PHOTO_BLOB', {
+    email: cleanEmail,
+    photoURL,
+    updatedAtIso: new Date().toISOString(),
+  });
+}
+
+export async function hydratePartyMemberAvatarsFromCloud(
+  store: CloudSyncStoreLike,
+  partyId: string
+): Promise<void> {
+  const party = store.parties[partyId];
+  if (!party || !Array.isArray(party.members)) return;
+
+  await Promise.all(
+    party.members.map(async (member) => {
+      if (!member || !member.email) return;
+      const cleanEmail = member.email.trim().toLowerCase();
+
+      if (member.photoURL && member.photoURL.startsWith('data:image/') && member.photoURL.length > 100) {
+        hydratedAvatarCache.set(cleanEmail, member.photoURL);
+        return;
+      }
+
+      const cached = hydratedAvatarCache.get(cleanEmail);
+      if (cached) {
+        member.photoURL = cached;
+        return;
+      }
+
+      const avatarDoc = await readCloudDoc<{ email: string; photoURL: string }>(
+        sanitizeAvatarDocId(cleanEmail)
+      );
+      if (avatarDoc?.photoURL && avatarDoc.photoURL.length > 20) {
+        hydratedAvatarCache.set(cleanEmail, avatarDoc.photoURL);
+        member.photoURL = avatarDoc.photoURL;
+      }
+    })
+  );
+
+  // Propagate hydrated member avatars into dropLogs, historyLogs, and alerts for this party
+  const avatarByUid = new Map<string, string>();
+  const avatarByEmail = new Map<string, string>();
+  for (const m of party.members) {
+    if (m.photoURL) {
+      avatarByUid.set(m.uid, m.photoURL);
+      if (m.email) avatarByEmail.set(m.email.trim().toLowerCase(), m.photoURL);
+    }
+  }
+
+  for (const drop of store.dropsByParty[partyId] || []) {
+    const resolved =
+      avatarByUid.get(drop.userId) ||
+      (drop.userEmail ? avatarByEmail.get(drop.userEmail.trim().toLowerCase()) : undefined);
+    if (resolved) drop.userPhotoURL = resolved;
+  }
+
+  for (const hist of store.historyByParty[partyId] || []) {
+    const resolved =
+      avatarByUid.get(hist.userId) ||
+      (hist.userEmail ? avatarByEmail.get(hist.userEmail.trim().toLowerCase()) : undefined);
+    if (resolved) hist.userPhotoURL = resolved;
+  }
 }
 
 /**
@@ -401,6 +685,48 @@ export function mergePartyStates(
 }
 
 /**
+ * Merges incoming cloud drops with local drops while preserving already-hydrated imageUrls.
+ */
+function mergePartyDrops(
+  existingDrops: TrashDropLog[] = [],
+  incomingDrops: TrashDropLog[] = []
+): TrashDropLog[] {
+  const byId = new Map<string, TrashDropLog>();
+  for (const d of [...incomingDrops, ...existingDrops]) {
+    if (!d || !d.id) continue;
+    const prev = byId.get(d.id);
+    const cachedPhoto = hydratedDropPhotoCache.get(d.id);
+    const bestImageUrl =
+      cachedPhoto ||
+      (d.imageUrl && d.imageUrl.length > 200 ? d.imageUrl : undefined) ||
+      (prev?.imageUrl && prev.imageUrl.length > 200 ? prev.imageUrl : undefined) ||
+      d.imageUrl ||
+      prev?.imageUrl;
+
+    if (!prev) {
+      byId.set(d.id, { ...d, imageUrl: bestImageUrl || '' });
+    } else {
+      byId.set(d.id, {
+        ...prev,
+        ...d,
+        verified: Boolean(d.verified || prev.verified),
+        verificationStatus:
+          d.verificationStatus !== 'PENDING_HOST_APPROVAL'
+            ? d.verificationStatus
+            : prev.verificationStatus || d.verificationStatus,
+        pointsAwarded: Math.max(d.pointsAwarded || 0, prev.pointsAwarded || 0),
+        imageUrl: bestImageUrl || '',
+      });
+    }
+  }
+  return Array.from(byId.values()).sort(
+    (a, b) =>
+      new Date(b.submittedIso || b.createdAt || 0).getTime() -
+      new Date(a.submittedIso || a.createdAt || 0).getTime()
+  );
+}
+
+/**
  * Pulls a specific party by its 6-character invite code from our Dual-Engine Cloud Store
  * (`code_<6CHAR>`, `party_<ID>`, `global_index`, and `invitations_all`) and merges it into the store.
  */
@@ -425,6 +751,7 @@ export async function pullPartyByInviteCodeFromCloud(
       invitations?: HouseholdInvitation[];
     }>(`code_${cleanCode}`, { forceFresh }),
     readCloudDoc<{
+      codeMap?: Record<string, string>;
       parties?: Record<string, PartyState>;
       invitations?: HouseholdInvitation[];
       deletedPartyIds?: string[];
@@ -476,19 +803,27 @@ export async function pullPartyByInviteCodeFromCloud(
       store.parties[pid] = remoteParty;
     }
 
-    if (partyBundle?.drops && !store.dropsByParty[pid]?.length) {
-      store.dropsByParty[pid] = partyBundle.drops;
+    if (Array.isArray(partyBundle?.drops)) {
+      store.dropsByParty[pid] = mergePartyDrops(store.dropsByParty[pid], partyBundle.drops);
+      await hydratePartyDropPhotosFromCloud(store, pid);
     }
-    if (partyBundle?.history && !store.historyByParty[pid]?.length) {
+    if (Array.isArray(partyBundle?.history) && partyBundle.history.length > 0) {
       store.historyByParty[pid] = partyBundle.history;
     }
-    if (partyBundle?.alerts && !store.alertsByParty[pid]?.length) {
+    if (Array.isArray(partyBundle?.alerts) && partyBundle.alerts.length > 0) {
       store.alertsByParty[pid] = partyBundle.alerts;
     }
+    await hydratePartyMemberAvatarsFromCloud(store, pid);
     return store.parties[pid];
   }
 
-  // 2. Match from `global_index.parties`
+  // 2. Match from `global_index.codeMap` or `global_index.parties`
+  const mappedPartyId = globalDoc?.codeMap?.[cleanCode];
+  if (mappedPartyId && !store.deletedPartyIds.includes(mappedPartyId)) {
+    const pulled = await pullPartyByIdFromCloud(store, mappedPartyId, { forceFresh: true });
+    if (pulled) return pulled;
+  }
+
   if (globalDoc?.parties) {
     for (const remoteParty of Object.values(globalDoc.parties)) {
       if (
@@ -515,6 +850,11 @@ export async function pullPartyByInviteCodeFromCloud(
           store.parties[pid] && !isFakeStubParty(store.parties[pid])
             ? mergePartyStates(store.parties[pid], latestRemote, store.leftPartyKeys)
             : latestRemote;
+
+        if (Array.isArray(partyBundle?.drops)) {
+          store.dropsByParty[pid] = mergePartyDrops(store.dropsByParty[pid], partyBundle.drops);
+          await hydratePartyDropPhotosFromCloud(store, pid);
+        }
         return store.parties[pid];
       }
     }
@@ -534,6 +874,7 @@ export async function pullPartyByInviteCodeFromCloud(
     ) {
       const partyBundle = await readCloudDoc<{
         party: PartyState;
+        drops?: TrashDropLog[];
       }>(`party_${inv.partyId}`, { forceFresh });
 
       const foundParty = partyBundle?.party || inv.partySnapshot;
@@ -543,6 +884,13 @@ export async function pullPartyByInviteCodeFromCloud(
           store.parties[foundParty.id] && !isFakeStubParty(store.parties[foundParty.id])
             ? mergePartyStates(store.parties[foundParty.id], foundParty, store.leftPartyKeys)
             : foundParty;
+        if (Array.isArray(partyBundle?.drops)) {
+          store.dropsByParty[foundParty.id] = mergePartyDrops(
+            store.dropsByParty[foundParty.id],
+            partyBundle.drops
+          );
+          await hydratePartyDropPhotosFromCloud(store, foundParty.id);
+        }
         return store.parties[foundParty.id];
       }
     }
@@ -580,15 +928,20 @@ export async function pullPartyByIdFromCloud(
       store.parties[partyId] && !isFakeStubParty(store.parties[partyId])
         ? mergePartyStates(store.parties[partyId], remoteParty, store.leftPartyKeys)
         : remoteParty;
-    if (partyBundle.drops && !store.dropsByParty[partyId]?.length) {
-      store.dropsByParty[partyId] = partyBundle.drops;
+    if (Array.isArray(partyBundle.drops)) {
+      store.dropsByParty[partyId] = mergePartyDrops(
+        store.dropsByParty[partyId],
+        partyBundle.drops
+      );
+      await hydratePartyDropPhotosFromCloud(store, partyId);
     }
-    if (partyBundle.history && !store.historyByParty[partyId]?.length) {
+    if (Array.isArray(partyBundle.history) && partyBundle.history.length > 0) {
       store.historyByParty[partyId] = partyBundle.history;
     }
-    if (partyBundle.alerts && !store.alertsByParty[partyId]?.length) {
+    if (Array.isArray(partyBundle.alerts) && partyBundle.alerts.length > 0) {
       store.alertsByParty[partyId] = partyBundle.alerts;
     }
+    await hydratePartyMemberAvatarsFromCloud(store, partyId);
     return store.parties[partyId];
   }
   return null;
@@ -630,8 +983,8 @@ export async function deletePartiesFromCloud(
 }
 
 /**
- * Pushes a specific party, its 6-character invite code (`code_<6CHAR>`), any per-email invitations,
- * and the global index to our Dual-Engine Cloud Store.
+ * Pushes a specific party, its 6-character invite code (`code_<6CHAR>`), any uploaded drop photos,
+ * any per-email invitations, and the global index to our Dual-Engine Cloud Store.
  */
 export async function pushPartyStoreToCloud(
   store: CloudSyncStoreLike,
@@ -649,7 +1002,9 @@ export async function pushPartyStoreToCloud(
     const partyIds = targetPartyId
       ? [targetPartyId]
       : Object.keys(store.parties)
-          .filter((id) => !store.deletedPartyIds.includes(id) && !isFakeStubParty(store.parties[id]))
+          .filter(
+            (id) => !store.deletedPartyIds.includes(id) && !isFakeStubParty(store.parties[id])
+          )
           .slice(0, 8);
 
     const writeTasks: Promise<void>[] = [];
@@ -660,22 +1015,47 @@ export async function pushPartyStoreToCloud(
       party.inviteCode = formatSixCharInviteCode(party.inviteCode);
       const cleanCode = cleanAlphanumericCode(party.inviteCode);
       const compactParty = compactPartyForCloud(party);
+      const indexCompactParty = compactPartyForCloud(party, { stripAvatarsForIndex: true });
 
-      const compactDrops = (store.dropsByParty[pid] || []).slice(0, 8).map((d) => ({
+      // Sync each member's profile photo to `avatar_<email>` so custom avatars work globally across all devices
+      for (const m of party.members || []) {
+        if (m.email && m.photoURL && m.photoURL.length > 60) {
+          writeTasks.push(writeMemberAvatarToCloud(m.email, m.photoURL));
+        }
+      }
+
+      const rawDrops = (store.dropsByParty[pid] || []).slice(0, 8);
+      // Save each drop's full-clarity photo into its own chunked `photo_<dropId>` doc
+      // and keep `party_<pid>` metadata lightweight so both party state and photos sync 100% reliably
+      for (const d of rawDrops) {
+        if (d.id && d.imageUrl && d.imageUrl.length > 200) {
+          writeTasks.push(writeDropPhotoToCloud(d.id, d.imageUrl));
+        }
+      }
+
+      const compactDrops: TrashDropLog[] = rawDrops.map((d) => ({
         ...d,
-        imageUrl: d.imageUrl && d.imageUrl.length > 60000 ? d.imageUrl.slice(0, 60000) : d.imageUrl,
+        userPhotoURL: undefined,
+        imageUrl: d.imageUrl && d.imageUrl.length <= 2200 ? d.imageUrl : '',
       }));
-      const compactHistory = (store.historyByParty[pid] || []).slice(0, 15).map((h) => ({
+
+      const compactHistory = (store.historyByParty[pid] || []).slice(0, 12).map((h) => ({
         ...h,
+        userPhotoURL: undefined,
         imageUrl: undefined,
       }));
-      const compactAlerts = (store.alertsByParty[pid] || []).slice(0, 15);
+      const compactAlerts = (store.alertsByParty[pid] || []).slice(0, 10).map((a) => ({
+        ...a,
+        senderPhotoURL: undefined,
+      }));
       const partyInvitations = (store.invitations || [])
         .filter((i) => i.partyId === pid)
+        .slice(0, 12)
         .map((i) => ({
           ...i,
+          hostPhotoURL: undefined,
           inviteCode: party.inviteCode,
-          partySnapshot: compactParty,
+          partySnapshot: indexCompactParty,
         }));
 
       writeTasks.push(
@@ -687,12 +1067,16 @@ export async function pushPartyStoreToCloud(
             drops: compactDrops,
             history: compactHistory,
             alerts: compactAlerts,
-            invitations: partyInvitations,
+            invitations: partyInvitations.map((inv) => ({
+              ...inv,
+              partySnapshot: undefined,
+            })),
           },
           options
         )
       );
 
+      // Keep `code_<6CHAR>` strictly < 2,000 bytes (single inline message, identical reliability to email invites)
       if (cleanCode.length >= 4) {
         writeTasks.push(
           writeCloudDoc(
@@ -701,9 +1085,7 @@ export async function pushPartyStoreToCloud(
             {
               partyId: pid,
               inviteCode: party.inviteCode,
-              party: compactParty,
-              alerts: compactAlerts,
-              invitations: partyInvitations,
+              party: indexCompactParty,
             },
             options
           )
@@ -720,10 +1102,12 @@ export async function pushPartyStoreToCloud(
                 item.invitedEmail.toLowerCase() === inv.invitedEmail.toLowerCase() &&
                 !store.deletedPartyIds.includes(item.partyId)
             )
+            .slice(0, 6)
             .map((item) => {
               const p = store.parties[item.partyId];
               return {
                 ...item,
+                hostPhotoURL: undefined,
                 inviteCode: formatSixCharInviteCode(p?.inviteCode || item.inviteCode),
                 partySnapshot: p ? compactPartyForCloud(p) : item.partySnapshot,
               };
@@ -741,6 +1125,7 @@ export async function pushPartyStoreToCloud(
     }
 
     const existingGlobal = await readCloudDoc<{
+      codeMap?: Record<string, string>;
       parties?: Record<string, PartyState>;
       invitations?: HouseholdInvitation[];
       deletedPartyIds?: string[];
@@ -749,28 +1134,43 @@ export async function pushPartyStoreToCloud(
 
     const mergedDeleted = Array.from(
       new Set([...(existingGlobal?.deletedPartyIds || []), ...(store.deletedPartyIds || [])])
-    );
+    ).slice(-60);
     const mergedLeft = Array.from(
       new Set([...(existingGlobal?.leftPartyKeys || []), ...(store.leftPartyKeys || [])])
-    );
+    ).slice(-60);
 
     store.deletedPartyIds = mergedDeleted;
     store.leftPartyKeys = mergedLeft;
 
     const mergedParties: Record<string, PartyState> = {};
+    const mergedCodeMap: Record<string, string> = { ...(existingGlobal?.codeMap || {}) };
+
     for (const [pid, rp] of Object.entries(existingGlobal?.parties || {})) {
       if (!rp || isFakeStubParty(rp) || mergedDeleted.includes(pid)) continue;
-      mergedParties[pid] = compactPartyForCloud(rp);
+      const compacted = compactPartyForCloud(rp, { stripAvatarsForIndex: true });
+      mergedParties[pid] = compacted;
+      const cCode = cleanAlphanumericCode(compacted.inviteCode);
+      if (cCode.length >= 4) mergedCodeMap[cCode] = pid;
     }
     for (const [pid, localParty] of Object.entries(store.parties)) {
       if (!localParty || isFakeStubParty(localParty) || mergedDeleted.includes(pid)) continue;
-      const compactLocal = compactPartyForCloud(localParty);
+      const compactLocal = compactPartyForCloud(localParty, { stripAvatarsForIndex: true });
       if (mergedParties[pid]) {
         mergedParties[pid] = compactPartyForCloud(
-          mergePartyStates(mergedParties[pid], compactLocal, mergedLeft)
+          mergePartyStates(mergedParties[pid], compactLocal, mergedLeft),
+          { stripAvatarsForIndex: true }
         );
       } else {
         mergedParties[pid] = compactLocal;
+      }
+      const cCode = cleanAlphanumericCode(mergedParties[pid].inviteCode);
+      if (cCode.length >= 4) mergedCodeMap[cCode] = pid;
+    }
+
+    // Remove any deleted parties from codeMap
+    for (const [cCode, pid] of Object.entries(mergedCodeMap)) {
+      if (mergedDeleted.includes(pid)) {
+        delete mergedCodeMap[cCode];
       }
     }
 
@@ -782,20 +1182,25 @@ export async function pushPartyStoreToCloud(
       if (!prev || inv.status !== 'PENDING') {
         invMap.set(inv.id, {
           ...inv,
+          hostPhotoURL: undefined,
           inviteCode: formatSixCharInviteCode(hostParty?.inviteCode || inv.inviteCode),
           partySnapshot: hostParty ? compactPartyForCloud(hostParty) : inv.partySnapshot,
         });
       }
     }
-    const mergedInvitations = Array.from(invMap.values()).slice(0, 60);
+    const mergedInvitations = Array.from(invMap.values()).slice(0, 25);
 
     writeTasks.push(
       writeCloudDoc(
         'global_index',
         'GLOBAL_INDEX',
         {
+          codeMap: mergedCodeMap,
           parties: mergedParties,
-          invitations: mergedInvitations,
+          invitations: mergedInvitations.map((inv) => ({
+            ...inv,
+            partySnapshot: undefined,
+          })),
           deletedPartyIds: mergedDeleted,
           leftPartyKeys: mergedLeft,
         },
@@ -866,6 +1271,7 @@ export async function syncStoreWithCloud(
 
       const [globalDoc, bundleDoc, emailInvitesDoc, allInvitesDoc] = await Promise.all([
         readCloudDoc<{
+          codeMap?: Record<string, string>;
           parties?: Record<string, PartyState>;
           invitations?: HouseholdInvitation[];
           deletedPartyIds?: string[];
@@ -975,11 +1381,12 @@ export async function syncStoreWithCloud(
           store.parties[activePid] && !isFakeStubParty(store.parties[activePid])
             ? mergePartyStates(store.parties[activePid], bundleDoc.party, store.leftPartyKeys)
             : bundleDoc.party;
-        if (
-          Array.isArray(bundleDoc.drops) &&
-          bundleDoc.drops.length > (store.dropsByParty[activePid]?.length || 0)
-        ) {
-          store.dropsByParty[activePid] = bundleDoc.drops;
+        if (Array.isArray(bundleDoc.drops)) {
+          store.dropsByParty[activePid] = mergePartyDrops(
+            store.dropsByParty[activePid],
+            bundleDoc.drops
+          );
+          await hydratePartyDropPhotosFromCloud(store, activePid);
         }
         if (
           Array.isArray(bundleDoc.history) &&
@@ -993,6 +1400,9 @@ export async function syncStoreWithCloud(
         ) {
           store.alertsByParty[activePid] = bundleDoc.alerts;
         }
+        await hydratePartyMemberAvatarsFromCloud(store, activePid);
+      } else if (activePid && store.parties[activePid]) {
+        await hydratePartyMemberAvatarsFromCloud(store, activePid);
       }
 
       // Ensure any valid active party in store is published to the cloud once per session so its 6-char code is discoverable
@@ -1013,6 +1423,6 @@ export async function syncStoreWithCloud(
 
   await Promise.race([
     runSync(),
-    new Promise<void>((resolve) => setTimeout(resolve, 2400)),
+    new Promise<void>((resolve) => setTimeout(resolve, 2800)),
   ]);
 }

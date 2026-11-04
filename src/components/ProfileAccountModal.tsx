@@ -7,18 +7,19 @@ import {
   Check,
   LogOut,
   ChevronLeft,
-  CheckCircle2,
 } from 'lucide-react';
+import { motion } from 'motion/react';
 import type { User } from 'firebase/auth';
-import {
-  OFFICIAL_BINDROP_EMAIL,
-  type HouseholdMember,
-} from '../utils/trashDutyLogic';
-import { compressUploadedImage } from '../utils/sceneImageGenerator';
+import { type HouseholdMember } from '../utils/trashDutyLogic';
+import { compressAvatarImage } from '../utils/sceneImageGenerator';
 import { MemberAvatar, PRESET_AVATARS } from './MemberAvatar';
+import { PushAlertsCard } from './PushAlertsCard';
+import { InstallPwaBanner } from './InstallPwaBanner';
 
 interface ProfileAccountViewProps {
   activeViewer: HouseholdMember;
+  partyId?: string;
+  partyName?: string;
   firebaseUser: User | null;
   onUpdateProfile: (
     uid: string,
@@ -27,13 +28,21 @@ interface ProfileAccountViewProps {
   onGoogleSignIn: () => Promise<unknown>;
   onSignOut: () => Promise<void>;
   onBackToHud: () => void;
+  onTriggerInAppBanner?: (banner: {
+    title: string;
+    message: string;
+    senderName: string;
+  }) => void;
 }
 
 export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
   activeViewer,
+  partyId = 'party_default',
+  partyName = 'BinDrop',
   onUpdateProfile,
   onSignOut,
   onBackToHud,
+  onTriggerInAppBanner,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [displayNameInput, setDisplayNameInput] = useState(activeViewer.displayName);
@@ -49,8 +58,7 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
     setPhotoPreview(activeViewer.photoURL);
     setStatusMessage(null);
     setErrorMessage(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeViewer.uid]);
+  }, [activeViewer.uid, activeViewer.displayName, activeViewer.email, activeViewer.photoURL]);
 
   const handlePhotoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -59,9 +67,9 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
     setStatusMessage(null);
     setIsUploadingPhoto(true);
     try {
-      const compressed = await compressUploadedImage(file);
+      const compressed = await compressAvatarImage(file);
       setPhotoPreview(compressed.dataUrl);
-      setStatusMessage('Photo ready — tap Save Profile to apply across your party.');
+      setStatusMessage('Photo ready — tap Save Profile to sync across all household devices.');
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to process profile picture.');
     } finally {
@@ -101,39 +109,49 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
   };
 
   return (
-    <div className="animate-view-enter max-w-xl mx-auto space-y-6">
-      <div className="glass-panel-elevated rounded-[32px] p-6 sm:p-8 space-y-6">
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+      className="max-w-xl mx-auto space-y-5"
+    >
+      {/* Dedicated App Install Banner for Android & iOS */}
+      <InstallPwaBanner compact />
+
+      {/* Lock-Screen Push Notification Settings Card */}
+      <PushAlertsCard
+        userEmail={activeViewer.email}
+        userUid={activeViewer.uid}
+        userDisplayName={activeViewer.displayName}
+        partyId={partyId}
+        partyName={partyName}
+        compact
+        onTriggerInAppBanner={onTriggerInAppBanner}
+      />
+
+      <div className="bento-stat-card rounded-[28px] p-6 sm:p-8 space-y-6">
         {/* Top Row: Circular Back Button + Centered Title + Role Pill */}
         <div className="flex items-center justify-between">
-          <button
+          <motion.button
             type="button"
+            whileTap={{ scale: 0.92 }}
             onClick={onBackToHud}
             aria-label="Back to Duty HUD"
-            className="w-11 h-11 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 flex items-center justify-center text-white transition-colors"
+            className="w-10 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 flex items-center justify-center text-white transition-colors"
           >
             <ChevronLeft className="w-5 h-5" />
-          </button>
+          </motion.button>
           <span className="text-sm og-medium text-white tracking-tight">
             Account &amp; Profile
           </span>
-          <div className="px-3.5 py-1.5 rounded-full bg-[#132916] border border-[#d0ff45]/35 text-xs og-bold text-[#d0ff45]">
+          <div className="px-3.5 py-1 rounded-full bg-[#182c1a] border border-[#c8ff2e]/35 text-xs og-bold text-[#c8ff2e]">
             {activeViewer.role}
           </div>
         </div>
 
-        {/* Center Hero Heading */}
-        <div className="text-center space-y-2 pt-1">
-          <h1 className="text-2xl sm:text-3xl og-bold text-white tracking-tight">
-            {activeViewer.displayName}
-          </h1>
-          <p className="text-xs sm:text-sm og-light text-zinc-400 max-w-sm mx-auto leading-relaxed">
-            Update your profile picture, display name, or notification email address used for 5-hour warnings and missed trash reminders.
-          </p>
-        </div>
-
         {/* Interactive Avatar Upload Centerpiece */}
-        <div className="flex flex-col items-center space-y-4">
-          <div className="relative group">
+        <div className="flex flex-col items-center space-y-3.5">
+          <div className="relative">
             <MemberAvatar
               member={{
                 displayName: displayNameInput || activeViewer.displayName,
@@ -143,14 +161,15 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
               size="xl"
               highlightRing
             />
-            <button
+            <motion.button
               type="button"
+              whileTap={{ scale: 0.9 }}
               onClick={() => fileInputRef.current?.click()}
               aria-label="Upload custom profile picture"
-              className="absolute -bottom-1 -right-1 w-9 h-9 rounded-full bg-[#d0ff45] text-[#041206] flex items-center justify-center shadow-lg hover:scale-105 transition-transform"
+              className="absolute -bottom-1 -right-1 w-9 h-9 rounded-full bg-[#c8ff2e] text-[#051807] flex items-center justify-center shadow-lg"
             >
               <Camera className="w-4 h-4" />
-            </button>
+            </motion.button>
             <input
               ref={fileInputRef}
               type="file"
@@ -161,56 +180,58 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
             />
           </div>
 
-          <div className="flex flex-wrap items-center justify-center gap-2">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="px-4 py-2 rounded-full bg-white/[0.07] hover:bg-white/[0.12] border border-white/10 text-xs og-medium text-white flex items-center gap-1.5 transition-colors"
-            >
-              <Camera className="w-3.5 h-3.5 text-[#d0ff45]" />
-              {isUploadingPhoto ? 'Processing Photo...' : 'Upload Photo from Phone'}
-            </button>
+          <div className="text-center">
+            <h1 className="text-xl sm:text-2xl og-bold text-white tracking-tight">
+              {activeViewer.displayName}
+            </h1>
+            <p className="text-xs text-zinc-400 font-mono">{activeViewer.email}</p>
           </div>
 
+          <motion.button
+            type="button"
+            whileTap={{ scale: 0.95 }}
+            onClick={() => fileInputRef.current?.click()}
+            className="px-4 py-2 rounded-full bg-white/[0.07] hover:bg-white/[0.12] border border-white/10 text-xs og-medium text-white flex items-center gap-1.5"
+          >
+            <Camera className="w-3.5 h-3.5 text-[#c8ff2e]" />
+            <span>{isUploadingPhoto ? 'Processing Photo...' : 'Change Avatar Photo'}</span>
+          </motion.button>
+
           {/* Quick-Pick Illustrated Avatars */}
-          <div className="pt-1 text-center space-y-2">
-            <span className="text-[11px] og-light text-zinc-400 block">
-              Or choose a quick neon avatar
-            </span>
-            <div className="flex items-center justify-center gap-2.5">
-              {PRESET_AVATARS.map((preset) => {
-                const isSelected = photoPreview === preset.url;
-                return (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => setPhotoPreview(preset.url)}
-                    aria-label={`Select ${preset.label} avatar`}
-                    className={`w-10 h-10 rounded-full overflow-hidden transition-transform ${
-                      isSelected
-                        ? 'ring-2 ring-[#d0ff45] scale-110'
-                        : 'opacity-75 hover:opacity-100 hover:scale-105'
-                    }`}
-                  >
-                    <img
-                      src={preset.url}
-                      alt={preset.label}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover"
-                    />
-                  </button>
-                );
-              })}
-            </div>
+          <div className="flex items-center justify-center gap-2 pt-1">
+            {PRESET_AVATARS.map((preset) => {
+              const isSelected = photoPreview === preset.url;
+              return (
+                <motion.button
+                  key={preset.id}
+                  type="button"
+                  whileTap={{ scale: 0.9 }}
+                  onClick={() => setPhotoPreview(preset.url)}
+                  aria-label={`Select ${preset.label} avatar`}
+                  className={`w-9 h-9 rounded-full overflow-hidden transition-transform ${
+                    isSelected
+                      ? 'ring-2 ring-[#c8ff2e] scale-110'
+                      : 'opacity-70 hover:opacity-100'
+                  }`}
+                >
+                  <img
+                    src={preset.url}
+                    alt={preset.label}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover"
+                  />
+                </motion.button>
+              );
+            })}
           </div>
         </div>
 
         {/* Profile Edit Form */}
         <form onSubmit={handleSaveProfile} className="space-y-4">
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <label
               htmlFor="profile-display-name"
-              className="block text-xs og-medium text-white pl-1"
+              className="block text-xs og-medium text-zinc-300 pl-1"
             >
               Display Name
             </label>
@@ -222,17 +243,17 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
                 value={displayNameInput}
                 onChange={(e) => setDisplayNameInput(e.target.value)}
                 placeholder="Enter your display name"
-                className="pill-input w-full pl-11 pr-4 py-3.5 rounded-full text-sm og-regular text-white placeholder:text-zinc-500"
+                className="pill-input w-full pl-11 pr-4 py-3 rounded-full text-sm text-white placeholder:text-zinc-500"
               />
             </div>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <label
               htmlFor="profile-email-address"
-              className="block text-xs og-medium text-white pl-1"
+              className="block text-xs og-medium text-zinc-300 pl-1"
             >
-              Notification Email (For 5-Hour Warnings &amp; Missed Trash Alerts)
+              Notification Email
             </label>
             <div className="relative flex items-center">
               <Mail className="w-4 h-4 text-zinc-400 absolute left-4 pointer-events-none" />
@@ -242,7 +263,7 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
                 value={emailInput}
                 onChange={(e) => setEmailInput(e.target.value)}
                 placeholder="Enter your email address"
-                className="pill-input w-full pl-11 pr-4 py-3.5 rounded-full text-sm og-regular text-white placeholder:text-zinc-500"
+                className="pill-input w-full pl-11 pr-4 py-3 rounded-full text-sm text-white placeholder:text-zinc-500"
               />
             </div>
           </div>
@@ -253,67 +274,41 @@ export const ProfileAccountView: React.FC<ProfileAccountViewProps> = ({
           {statusMessage && (
             <p
               data-testid="profile-save-confirmation"
-              className="text-xs text-[#d0ff45] og-medium text-center flex items-center justify-center gap-1.5"
+              className="text-xs text-[#c8ff2e] og-medium text-center flex items-center justify-center gap-1.5"
             >
               <Check className="w-4 h-4" />
               {statusMessage}
             </p>
           )}
 
-          <button
+          <motion.button
             type="submit"
+            whileTap={{ scale: 0.96 }}
             className="lime-cta w-full py-3.5 px-6 rounded-full og-bold text-sm flex items-center justify-center gap-2 min-h-[48px]"
           >
             <span>Save Profile</span>
             <ArrowRight className="w-4 h-4" />
-          </button>
+          </motion.button>
         </form>
 
-        {/* Divider ("OFFICIAL EMAIL SYSTEM & SESSION") */}
-        <div className="flex items-center gap-4">
-          <div className="h-px flex-1 bg-white/[0.08]" />
-          <span className="text-[11px] uppercase tracking-widest text-zinc-500 og-medium">
-            OFFICIAL EMAIL &amp; SESSION
-          </span>
-          <div className="h-px flex-1 bg-white/[0.08]" />
-        </div>
-
-        {/* Integrated Official Email Sender & Sign Out */}
-        <div className="space-y-3">
-          <div className="p-4 rounded-2xl bg-[#0e2612] border border-[#d0ff45]/40 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <CheckCircle2 className="w-5 h-5 text-[#d0ff45] shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-[#d0ff45] og-bold">
-                  Official BinDrop Mailer Integrated
-                </p>
-                <p className="text-xs text-zinc-300 font-mono truncate">
-                  Sender: {OFFICIAL_BINDROP_EMAIL}
-                </p>
-              </div>
-            </div>
-            <span className="px-3 py-1 rounded-full bg-[#d0ff45] text-[#041206] text-[10px] og-bold shrink-0">
-              ACTIVE
-            </span>
+        {/* Sign Out Row */}
+        <div className="pt-4 border-t border-white/[0.08] flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs text-[#c8ff2e] og-medium">Signed In Account</p>
+            <p className="text-xs text-zinc-400 font-mono truncate">{activeViewer.email}</p>
           </div>
-
-          <div className="p-4 rounded-2xl bg-[#07190a] border border-white/10 flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs text-[#d0ff45] og-medium">Signed In Account</p>
-              <p className="text-xs text-zinc-300 font-mono truncate">{activeViewer.email}</p>
-            </div>
-            <button
-              type="button"
-              onClick={onSignOut}
-              data-testid="sign-out-button"
-              className="px-4 py-2 rounded-full bg-white/[0.08] hover:bg-white/[0.14] text-xs og-medium text-white flex items-center gap-1.5 shrink-0"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              Sign Out
-            </button>
-          </div>
+          <motion.button
+            type="button"
+            whileTap={{ scale: 0.95 }}
+            onClick={onSignOut}
+            data-testid="sign-out-button"
+            className="px-4 py-2.5 rounded-full bg-white/[0.08] hover:bg-white/[0.14] text-xs og-medium text-white flex items-center gap-1.5 shrink-0"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign Out</span>
+          </motion.button>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 };

@@ -12,11 +12,9 @@ import {
   getMobilePushEnvironment,
   getSavedLocalPushState,
   subscribeUserToBackgroundPush,
-  triggerSystemNotificationViaServiceWorker,
   unsubscribeUserFromBackgroundPush,
   type MobilePushEnvironment,
 } from '../utils/pushClient';
-import { apiFetch } from '../utils/apiClient';
 
 interface PushAlertsCardProps {
   userEmail: string;
@@ -49,7 +47,6 @@ export const PushAlertsCard: React.FC<PushAlertsCardProps> = ({
     return saved.enabled && currentEnv.permission === 'granted';
   });
   const [busy, setBusy] = useState(false);
-  const [testingPush, setTestingPush] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showIosGuideModal, setShowIosGuideModal] = useState(false);
@@ -107,7 +104,7 @@ export const PushAlertsCard: React.FC<PushAlertsCardProps> = ({
         } else {
           setAlertsEnabled(true);
           setStatusMessage(
-            'Instagram-style lock-screen & banner alerts are now active for all household events!'
+            'Lock-screen & banner alerts are now active for all household events!'
           );
           if (onTriggerInAppBanner) {
             onTriggerInAppBanner({
@@ -123,78 +120,6 @@ export const PushAlertsCard: React.FC<PushAlertsCardProps> = ({
       }
     } finally {
       setBusy(false);
-    }
-  };
-
-  const handleSendTestPush = async () => {
-    setErrorMessage(null);
-    setStatusMessage(null);
-    setTestingPush(true);
-
-    try {
-      const currentEnv = getMobilePushEnvironment();
-      if (currentEnv.iosNeedsHomeScreenInstall) {
-        setShowIosGuideModal(true);
-      }
-
-      // If user hasn't enabled OS alerts yet and isn't blocked by iOS Safari rule, request permission on this click
-      if (!alertsEnabled && !currentEnv.iosNeedsHomeScreenInstall && currentEnv.supportsNotifications) {
-        const subRes = await subscribeUserToBackgroundPush({
-          userEmail,
-          userUid,
-          userDisplayName,
-          partyId,
-        });
-        if (subRes.ok) {
-          setAlertsEnabled(true);
-          setEnv(getMobilePushEnvironment());
-        }
-      }
-
-      const title = `🔔 ${partyName || 'BinDrop'} · Live Alert Test`;
-      const body = `Hey ${
-        userDisplayName || userEmail.split('@')[0]
-      }! Lock-screen & banner push notifications are working on your device.`;
-
-      // 1. Trigger immediate In-App Social Pop-Up Banner at the top of the screen
-      if (onTriggerInAppBanner) {
-        onTriggerInAppBanner({
-          title,
-          message: body,
-          senderName: `${partyName || 'BinDrop'} · Push Alert`,
-          category: 'TURN_REMINDER',
-        });
-      }
-
-      // 2. Trigger native OS notification via Service Worker (works on Android Chrome, iOS 16.4+ PWA & Desktop)
-      const osDelivered = await triggerSystemNotificationViaServiceWorker({
-        title,
-        body,
-        tag: `bindrop-test-${Date.now()}`,
-        category: 'TURN_REMINDER',
-      });
-
-      // 3. Also trigger encrypted VAPID Web Push from the backend to test background delivery
-      await apiFetch('/api/push/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userEmail,
-          userDisplayName,
-          partyId,
-          partyName: partyName || 'BinDrop Household',
-          title,
-          body,
-        }),
-      }).catch(() => {});
-
-      setStatusMessage(
-        osDelivered
-          ? 'Test lock-screen & pop-up notification delivered to your device!'
-          : 'In-app social pop-up banner triggered! Flip "Turn on Alerts" above for lock-screen OS banners.'
-      );
-    } finally {
-      setTestingPush(false);
     }
   };
 
@@ -239,23 +164,13 @@ export const PushAlertsCard: React.FC<PushAlertsCardProps> = ({
             <p className="text-[11px] text-zinc-400 leading-snug truncate">
               {env.iosNeedsHomeScreenInstall
                 ? 'Install to iPhone Home Screen to unlock push alerts'
-                : 'Get Instagram-style lock-screen & banner alerts'}
+                : 'Get lock-screen & banner alerts for turns & deadlines'}
             </p>
           </div>
         </div>
 
-        {/* Interactive User-Action Toggle Switch (Crucial Mobile Rule #2) */}
+        {/* Interactive User-Action Toggle Switch */}
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={handleSendTestPush}
-            disabled={testingPush}
-            className="px-2.5 py-1.5 rounded-xl bg-white/8 hover:bg-white/15 border border-white/15 text-[10px] font-bold text-[#d0ff45] transition cursor-pointer disabled:opacity-50"
-            title="Send a live pop-up & lock-screen test notification"
-          >
-            {testingPush ? 'Sending...' : 'Test Push'}
-          </button>
-
           <button
             type="button"
             role="switch"

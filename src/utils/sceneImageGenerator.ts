@@ -159,6 +159,13 @@ export async function renderSceneToJpegBase64(svgDataUrl: string): Promise<{
   });
 }
 
+export function generateSimulatedTrashSceneDataUrl(_opts?: {
+  memberName?: string;
+  variant?: string;
+}): string {
+  return PRESET_SCENES[0].dataUrl;
+}
+
 export async function compressUploadedImage(file: File): Promise<{
   dataUrl: string;
   mimeType: string;
@@ -167,35 +174,139 @@ export async function compressUploadedImage(file: File): Promise<{
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Failed to read image file.'));
     reader.onload = () => {
+      const rawDataUrl = String(reader.result || '');
       const img = new Image();
       img.onload = () => {
-        const maxDim = 1024;
-        let { width, height } = img;
+        const naturalW = img.naturalWidth || img.width || 0;
+        const naturalH = img.naturalHeight || img.height || 0;
+        if (naturalW <= 0 || naturalH <= 0) {
+          resolve({
+            dataUrl: rawDataUrl || PRESET_SCENES[0].dataUrl,
+            mimeType: file.type || 'image/jpeg',
+          });
+          return;
+        }
+
+        const maxDim = 480;
+        let width = naturalW;
+        let height = naturalH;
         if (width > maxDim || height > maxDim) {
           if (width > height) {
-            height = Math.round((height * maxDim) / width);
+            height = Math.max(1, Math.round((height * maxDim) / width));
             width = maxDim;
           } else {
-            width = Math.round((width * maxDim) / height);
+            width = Math.max(1, Math.round((width * maxDim) / height));
             height = maxDim;
           }
         }
+
         const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         if (!ctx) {
-          resolve({ dataUrl: String(reader.result), mimeType: file.type || 'image/jpeg' });
+          resolve({ dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' });
           return;
         }
+
+        // Fill opaque dark background first so transparent PNGs/WebPs or camera frames never render blank
+        ctx.fillStyle = '#041206';
+        ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
-        const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.82);
+
+        let quality = 0.72;
+        let compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+        while (compressedDataUrl.length > 26000 && quality > 0.42) {
+          quality -= 0.1;
+          compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+        }
+
+        if (!compressedDataUrl || compressedDataUrl === 'data:,' || compressedDataUrl.length < 120) {
+          resolve({
+            dataUrl: rawDataUrl || PRESET_SCENES[0].dataUrl,
+            mimeType: file.type || 'image/jpeg',
+          });
+          return;
+        }
+
         resolve({ dataUrl: compressedDataUrl, mimeType: 'image/jpeg' });
       };
       img.onerror = () =>
-        resolve({ dataUrl: String(reader.result), mimeType: file.type || 'image/jpeg' });
-      img.src = String(reader.result);
+        resolve({
+          dataUrl: rawDataUrl || PRESET_SCENES[0].dataUrl,
+          mimeType: file.type || 'image/jpeg',
+        });
+      img.src = rawDataUrl;
     };
     reader.readAsDataURL(file);
   });
 }
+
+/**
+ * Center-crops and compresses a user's uploaded profile picture into a crisp 140x140 square JPEG
+ * (< 5,000 characters) so it syncs globally across all household members and devices.
+ */
+export async function compressAvatarImage(file: File): Promise<{
+  dataUrl: string;
+  mimeType: string;
+}> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read profile image file.'));
+    reader.onload = () => {
+      const rawDataUrl = String(reader.result || '');
+      const img = new Image();
+      img.onload = () => {
+        const naturalW = img.naturalWidth || img.width || 0;
+        const naturalH = img.naturalHeight || img.height || 0;
+        if (naturalW <= 0 || naturalH <= 0) {
+          resolve({
+            dataUrl: rawDataUrl,
+            mimeType: file.type || 'image/jpeg',
+          });
+          return;
+        }
+
+        const targetSize = 140;
+        const minSide = Math.min(naturalW, naturalH);
+        const sx = Math.max(0, Math.floor((naturalW - minSide) / 2));
+        const sy = Math.max(0, Math.floor((naturalH - minSide) / 2));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetSize;
+        canvas.height = targetSize;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' });
+          return;
+        }
+
+        ctx.fillStyle = '#071a0a';
+        ctx.fillRect(0, 0, targetSize, targetSize);
+        ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, targetSize, targetSize);
+
+        let quality = 0.74;
+        let avatarDataUrl = canvas.toDataURL('image/jpeg', quality);
+        while (avatarDataUrl.length > 5200 && quality > 0.38) {
+          quality -= 0.08;
+          avatarDataUrl = canvas.toDataURL('image/jpeg', quality);
+        }
+
+        if (!avatarDataUrl || avatarDataUrl === 'data:,' || avatarDataUrl.length < 100) {
+          resolve({ dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' });
+          return;
+        }
+
+        resolve({ dataUrl: avatarDataUrl, mimeType: 'image/jpeg' });
+      };
+      img.onerror = () =>
+        resolve({
+          dataUrl: rawDataUrl,
+          mimeType: file.type || 'image/jpeg',
+        });
+      img.src = rawDataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+

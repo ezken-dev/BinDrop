@@ -25,16 +25,20 @@ import {
   Bell,
   BellRing,
   Check,
+  Home,
+  LayoutGrid,
+  Trophy,
+  Copy,
 } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 import { type User } from 'firebase/auth';
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import {
   auth,
-  db,
   googleSignIn,
   initAuth,
   signOutUser,
 } from './firebase';
+import { generateSimulatedTrashSceneDataUrl } from './utils/sceneImageGenerator';
 import {
   evaluateDeadlineStatus,
   formatCountdown,
@@ -224,15 +228,10 @@ export default function App() {
     () => initialCachedBundle.current?.mailerStatus || null
   );
 
-  // Social Pop-Up Notification Banner & Notification Drawer state
+  // Social Pop-Up Notification Banner, Notification Drawer & Streak Sheet state
   const [activePopupToast, setActivePopupToast] = useState<PartyAlertItem | null>(null);
   const [isNotifDrawerOpen, setIsNotifDrawerOpen] = useState(false);
-  const [browserPushPermission, setBrowserPushPermission] = useState<string>(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
-      return Notification.permission;
-    }
-    return 'default';
-  });
+  const [isStreakSheetOpen, setIsStreakSheetOpen] = useState(false);
   const seenPopupIdsRef = useRef<Set<string>>(loadSeenPopupIds());
   const sessionMutationEpochRef = useRef<number>(0);
 
@@ -381,78 +380,14 @@ export default function App() {
     return () => navigator.serviceWorker.removeEventListener('message', handleSwMessage);
   }, [party?.id, party?.name, currentAccount?.uid, currentAccount?.displayName, currentAccount?.email]);
 
-  // Sync with Firebase Firestore when Firebase Auth user is active (non-blocking)
+  // Cloud sync is handled by apiFetch + Dual-Engine Cloud Sync (cloudPartySync.ts)
   const syncPartyToFirestore = useCallback(
     async (
-      updatedParty: PartyState,
-      newDrop?: TrashDropLog,
-      newHistory?: TurnHistoryRecord
+      _updatedParty: PartyState,
+      _newDrop?: TrashDropLog,
+      _newHistory?: TurnHistoryRecord
     ) => {
-      if (!auth.currentUser) return;
-      const uid = auth.currentUser.uid;
-      try {
-        setDoc(
-          doc(db, 'parties', updatedParty.id),
-          {
-            id: updatedParty.id,
-            name: updatedParty.name,
-            inviteCode: updatedParty.inviteCode,
-            hostId: updatedParty.hostId,
-            memberIds: updatedParty.memberIds,
-            currentTurnIndex: updatedParty.currentTurnIndex,
-            currentTurnUserId: updatedParty.currentTurnUserId,
-            turnStatus: updatedParty.turnStatus,
-            nextDeadline: updatedParty.nextDeadline,
-            rotationIntervalHours: updatedParty.rotationIntervalHours,
-            warningEmailSentForCurrentTurn: Boolean(
-              updatedParty.warningEmailSentForCurrentTurn
-            ),
-            missedEmailSentForCurrentTurn: Boolean(
-              updatedParty.missedEmailSentForCurrentTurn
-            ),
-            hostAlertedForCurrentTurn: Boolean(updatedParty.hostAlertedForCurrentTurn),
-            totalPartyDrops: updatedParty.totalPartyDrops,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        ).catch(() => {});
-
-        if (newDrop && newDrop.userId === uid) {
-          setDoc(doc(db, 'parties', updatedParty.id, 'drops', newDrop.id), {
-            id: newDrop.id,
-            partyId: updatedParty.id,
-            userId: uid,
-            userDisplayName: newDrop.userDisplayName,
-            imageUrl: newDrop.imageUrl,
-            verified: newDrop.verified,
-            verificationStatus: newDrop.verificationStatus,
-            locationNote: newDrop.locationNote,
-            pointsAwarded: newDrop.pointsAwarded,
-            completedOnTime: newDrop.completedOnTime,
-            deadlineIso: newDrop.deadlineIso,
-            submittedIso: newDrop.submittedIso,
-            createdAt: serverTimestamp(),
-          }).catch(() => {});
-        }
-
-        if (newHistory) {
-          setDoc(doc(db, 'parties', updatedParty.id, 'history', newHistory.id), {
-            id: newHistory.id,
-            partyId: updatedParty.id,
-            userId: newHistory.userId,
-            userDisplayName: newHistory.userDisplayName,
-            outcome: newHistory.outcome,
-            pointsAwarded: newHistory.pointsAwarded,
-            deadlineIso: newHistory.deadlineIso,
-            recordedIso: newHistory.recordedIso,
-            notes: newHistory.notes,
-            createdAt: serverTimestamp(),
-          }).catch(() => {});
-        }
-      } catch {
-        // Non-blocking if user is signed in via email/password session without Google token
-      }
+      // Handled by Dual-Engine Cloud Sync in apiFetch / cloudPartySync.ts
     },
     []
   );
@@ -482,7 +417,8 @@ export default function App() {
           if (
             prev.partyId !== data.user.partyId ||
             prev.displayName !== data.user.displayName ||
-            prev.email !== data.user.email
+            prev.email !== data.user.email ||
+            prev.photoURL !== data.user.photoURL
           ) {
             return data.user;
           }
@@ -561,33 +497,6 @@ export default function App() {
               applyServerBundle(data.bundle);
             }
           }
-
-          setDoc(
-            doc(db, 'users', user.uid),
-            {
-              uid: user.uid,
-              displayName: user.displayName || user.email.split('@')[0],
-              photoURL: user.photoURL || '',
-              totalDrops: 0,
-              onTimeDrops: 0,
-              missedDrops: 0,
-              points: 0,
-              currentStreak: 0,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          ).catch(() => {});
-
-          setDoc(
-            doc(db, 'users', user.uid, 'private', 'info'),
-            {
-              email: user.email,
-              notificationsEnabled: true,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          ).catch(() => {});
         } catch {
           // ignore
         }
@@ -595,50 +504,6 @@ export default function App() {
     });
     return () => unsubscribe();
   }, [applyServerBundle]);
-
-  // --- BROWSER PUSH & MOBILE SOCIAL POP-UP TEST HANDLER ---
-  const handleEnableBrowserPush = async () => {
-    // Close the notification drawer first so the floating social pop-up banner is immediately visible at the top of the phone/PC screen!
-    setIsNotifDrawerOpen(false);
-
-    const testAlert: PartyAlertItem = {
-      id: `test_popup_${Date.now()}`,
-      partyId: party?.id || 'party_test',
-      targetUserId: currentAccount?.uid || 'u_test',
-      targetDisplayName: currentAccount?.displayName || 'You',
-      targetEmail: currentAccount?.email || OFFICIAL_BINDROP_EMAIL,
-      assigneeUserId: currentAccount?.uid || 'u_test',
-      assigneeDisplayName: currentAccount?.displayName || 'You',
-      senderName: currentAccount?.displayName || OFFICIAL_BINDROP_NAME,
-      senderPhotoURL: currentAccount?.photoURL,
-      title: `🔔 Live Pop-Up Test · ${party?.name || 'BinDrop'}`,
-      category: 'MANUAL_NUDGE',
-      type: 'TURN_REMINDER',
-      message:
-        'Pop-up notifications & sound alerts are working on your phone & PC! You will receive live pop-up banners for 5h warnings, missed turns, and roommate uploads.',
-      read: false,
-      createdAt: new Date().toISOString(),
-    };
-
-    // Always trigger the in-app Instagram/Facebook-style floating pop-up banner + sound chime + phone vibration immediately!
-    showSocialPopupNotification(testAlert);
-
-    try {
-      if (typeof window !== 'undefined' && 'Notification' in window) {
-        if (Notification.permission !== 'granted') {
-          const permission = await Notification.requestPermission();
-          setBrowserPushPermission(permission);
-          if (permission === 'granted') {
-            triggerBrowserPushNotification(testAlert.title!, testAlert.message, testAlert.id);
-          }
-        } else {
-          setBrowserPushPermission('granted');
-        }
-      }
-    } catch {
-      // Mobile browsers/WebViews that block OS Notification API still show the in-app social pop-up banner above
-    }
-  };
 
   // --- AUTHENTICATION HANDLERS ---
   const handleRegisterWithEmail = async (payload: {
@@ -1343,12 +1208,109 @@ export default function App() {
 
   const deadlineEvaluation = evaluateDeadlineStatus(party, nowMs);
   const countdown = formatCountdown(deadlineEvaluation.remainingMs);
-  const sortedLeaderboard = [...party.members].sort((a, b) => b.points - a.points);
   const pendingApprovalDrops = dropLogs.filter(
     (d) => d.verificationStatus === 'PENDING_HOST_APPROVAL'
   );
   const unreadAlertsCount = alerts.filter((a) => !a.read).length;
   const formattedPartyCode = formatSixCharInviteCode(party.inviteCode);
+
+  // Format countdown in "14 hrs 32 mins" style matching the reference design
+  const totalAbsMinutes = Math.max(
+    0,
+    Math.floor(Math.abs(deadlineEvaluation.remainingMs) / 60000)
+  );
+  const displayHrs = Math.floor(totalAbsMinutes / 60);
+  const displayMins = totalAbsMinutes % 60;
+  const minimalistCountdownText = countdown.isOverdue
+    ? `Overdue by ${displayHrs} hrs ${displayMins} mins`
+    : `${displayHrs} hrs ${displayMins} mins`;
+
+  // Cycles Completed metric & SVG progress ring
+  const cyclesCompletedValue =
+    party.totalPartyDrops > 0
+      ? party.totalPartyDrops
+      : activeViewer.totalDrops > 0
+      ? activeViewer.totalDrops
+      : 0;
+  const ringRadius = 38;
+  const ringCircumference = 2 * Math.PI * ringRadius;
+  const ringProgressRatio =
+    cyclesCompletedValue === 0
+      ? 0.14
+      : Math.min(0.95, Math.max(0.18, (cyclesCompletedValue % 20) / 20 || 0.72));
+  const ringDashOffset = ringCircumference * (1 - ringProgressRatio);
+
+  // Interactive Current Streak metrics, Milestone Progress & 5 Recent Turn Dots
+  const currentStreakCount = activeViewer.currentStreak || 0;
+  const bestStreakCount = Math.max(activeViewer.bestStreak || 0, currentStreakCount);
+  const streakMilestones = [3, 5, 7, 10, 15, 25, 50];
+  const nextStreakMilestone =
+    streakMilestones.find((m) => m > currentStreakCount) ||
+    Math.ceil((currentStreakCount + 1) / 10) * 10;
+  const streakProgressPct = Math.min(
+    100,
+    Math.max(
+      currentStreakCount > 0 ? 18 : 6,
+      Math.round((currentStreakCount / nextStreakMilestone) * 100)
+    )
+  );
+  const nextTurnPotentialPoints = 100 + currentStreakCount * 15;
+
+  // Build 5 Turn Dots from real turn history + drop logs (viewer's turns first, falling back to party turns)
+  const viewerHistoryRecords = historyLogs.filter(
+    (h) =>
+      h.userId === activeViewer.uid ||
+      h.userEmail.toLowerCase() === activeViewer.email.toLowerCase()
+  );
+  const relevantHistoryForDots = (
+    viewerHistoryRecords.length > 0 ? viewerHistoryRecords : historyLogs
+  ).slice(0, 5);
+
+  const recentTurnDots = Array.from({ length: 5 }, (_, idx) => {
+    const rec = relevantHistoryForDots[4 - idx];
+    if (rec) {
+      if (rec.outcome === 'ON_TIME') {
+        return {
+          key: rec.id,
+          status: 'ON_TIME' as const,
+          label: `On-Time (+${rec.pointsAwarded} pts)`,
+        };
+      }
+      if (rec.outcome === 'MISSED_DEADLINE' || rec.outcome === 'COMPLETED_LATE') {
+        return {
+          key: rec.id,
+          status: 'MISSED' as const,
+          label: rec.outcome === 'MISSED_DEADLINE' ? 'Missed Turn' : 'Completed Late',
+        };
+      }
+      return {
+        key: rec.id,
+        status: 'SKIPPED' as const,
+        label: 'Rotated by Host',
+      };
+    }
+    // If no history record for this slot, light up slots up to currentStreakCount as ON_TIME
+    const filledIndex = idx - (5 - Math.min(5, currentStreakCount));
+    if (filledIndex >= 0 && currentStreakCount > 0) {
+      return {
+        key: `streak_slot_${idx}`,
+        status: 'ON_TIME' as const,
+        label: 'Verified Streak Turn',
+      };
+    }
+    if (idx === 4 && pendingApprovalDrops.length > 0) {
+      return {
+        key: `pending_slot_${idx}`,
+        status: 'PENDING' as const,
+        label: 'Awaiting Host Verification',
+      };
+    }
+    return {
+      key: `empty_slot_${idx}`,
+      status: 'UPCOMING' as const,
+      label: 'Upcoming Turn Slot',
+    };
+  });
 
   const openHudFiveHourWarningModal = () => {
     const formattedDeadline = formatDateTimeReadable(party.nextDeadline).fullLabel;
@@ -1362,84 +1324,93 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen text-slate-100 pb-20 md:pb-12">
+    <div className="min-h-screen text-slate-100 pb-28 md:pb-14">
       {/* FACEBOOK / INSTAGRAM STYLE FLOATING SOCIAL POP-UP NOTIFICATION BANNER */}
       {socialPopupBannerElement}
 
-      {/* Strict 3-Zone Top Bar Contract */}
-      <header className="sticky top-0 z-30 h-14 glass-panel border-b border-white/[0.08] px-4 sm:px-8 flex items-center justify-between gap-4 sm:gap-8">
-        {/* Zone 1: Single text element wordmark */}
-        <a
+      {/* Minimalist Top Bar */}
+      <header className="sticky top-0 z-30 h-16 bg-[#061408]/85 backdrop-blur-xl border-b border-white/[0.06] px-5 sm:px-8 flex items-center justify-between max-w-5xl mx-auto">
+        {/* Left: Clean BinDrop Wordmark */}
+        <motion.a
           href="#top"
+          whileTap={{ scale: 0.96 }}
           onClick={(e) => {
             e.preventDefault();
             setActiveTab('hud');
           }}
-          className="text-xl og-bold tracking-tight text-white font-display whitespace-nowrap shrink-0"
+          className="text-xl sm:text-2xl og-bold tracking-tight text-white font-display select-none"
         >
           BinDrop
-        </a>
+        </motion.a>
 
-        {/* Zone 2: 4 concise single-line text navigation links */}
+        {/* Center (Desktop Only): Minimalist Pill Navigation with Sliding Indicator */}
         <nav
           aria-label="Primary Navigation"
-          className="hidden md:flex items-center gap-6 text-sm og-medium text-zinc-400"
+          className="hidden md:flex items-center gap-1 p-1 rounded-full bg-[#0d1f10] border border-white/[0.08]"
         >
-          <button
-            type="button"
-            onClick={() => setActiveTab('hud')}
-            className={`transition-colors whitespace-nowrap shrink-0 underline-offset-8 ${
-              activeTab === 'hud' ? 'text-[#d0ff45] underline og-bold' : 'hover:text-white'
-            }`}
-          >
-            Duty HUD
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('admin')}
-            data-testid="nav-admin-history"
-            className={`transition-colors whitespace-nowrap shrink-0 underline-offset-8 ${
-              activeTab === 'admin'
-                ? 'text-[#d0ff45] underline og-bold'
-                : 'hover:text-white'
-            }`}
-          >
-            Admin &amp; History
-            {pendingApprovalDrops.length > 0 && (
-              <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-400 text-[#041206] text-[10px] og-bold">
-                {pendingApprovalDrops.length}
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('party')}
-            className={`transition-colors whitespace-nowrap shrink-0 underline-offset-8 ${
-              activeTab === 'party' ? 'text-[#d0ff45] underline og-bold' : 'hover:text-white'
-            }`}
-          >
-            Party Setup
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('profile')}
-            data-testid="nav-profile"
-            className={`transition-colors whitespace-nowrap shrink-0 underline-offset-8 ${
-              activeTab === 'profile'
-                ? 'text-[#d0ff45] underline og-bold'
-                : 'hover:text-white'
-            }`}
-          >
-            Profile
-          </button>
+          {(
+            [
+              { id: 'hud', label: 'Duty HUD' },
+              { id: 'party', label: 'Queue & Party' },
+              {
+                id: 'admin',
+                label: 'Standings & DB',
+                badge: pendingApprovalDrops.length,
+              },
+              { id: 'profile', label: 'Profile' },
+            ] as const
+          ).map((item) => {
+            const isActive = activeTab === item.id;
+            return (
+              <motion.button
+                key={item.id}
+                type="button"
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setActiveTab(item.id)}
+                data-testid={
+                  item.id === 'admin'
+                    ? 'nav-admin-history'
+                    : item.id === 'profile'
+                    ? 'nav-profile'
+                    : undefined
+                }
+                className={`relative px-4 py-1.5 rounded-full text-xs og-bold transition-colors ${
+                  isActive ? 'text-[#051807]' : 'text-zinc-300 hover:text-white'
+                }`}
+              >
+                {isActive && (
+                  <motion.div
+                    layoutId="desktop-nav-pill"
+                    transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                    className="absolute inset-0 rounded-full bg-[#c8ff2e]"
+                  />
+                )}
+                <span className="relative z-10 flex items-center gap-1.5">
+                  {item.label}
+                  {'badge' in item && item.badge > 0 && (
+                    <span
+                      className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+                        isActive
+                          ? 'bg-[#051807] text-[#c8ff2e]'
+                          : 'bg-amber-400 text-[#051807]'
+                      }`}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
+                </span>
+              </motion.button>
+            );
+          })}
         </nav>
 
-        {/* Zone 3: Install App CTA + Notification Bell + Primary Action */}
-        <div className="flex items-center gap-2.5 shrink-0">
+        {/* Right: App Install Helper + Notification Bell with Red Unread Dot */}
+        <div className="flex items-center gap-2.5">
           <InstallPwaHeaderButton />
 
-          <button
+          <motion.button
             type="button"
+            whileTap={{ scale: 0.9 }}
             data-testid="top-notification-bell-btn"
             onClick={() => {
               setIsNotifDrawerOpen((prev) => !prev);
@@ -1447,72 +1418,744 @@ export default function App() {
                 handleMarkAllAlertsRead();
               }
             }}
-            aria-label="Open Pop-Up Notifications Feed"
-            className="relative w-9 h-9 rounded-full bg-[#091c0b] hover:bg-[#122b15] border border-white/15 flex items-center justify-center text-white transition-colors"
+            aria-label="Open Notifications"
+            className="relative w-10 h-10 rounded-full bg-white/[0.04] hover:bg-white/[0.09] border border-white/[0.08] flex items-center justify-center text-white transition-colors"
           >
-            <Bell className="w-4 h-4 text-[#d0ff45]" />
-            {unreadAlertsCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] og-bold flex items-center justify-center shadow">
-                {unreadAlertsCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsScannerOpen(true)}
-            className="lime-cta px-4 py-2 text-xs og-bold rounded-full whitespace-nowrap shrink-0"
-          >
-            Upload Trash Photo
-          </button>
+            <Bell className="w-5 h-5 text-zinc-100" />
+            <span
+              className={`absolute top-2 right-2.5 w-2.5 h-2.5 rounded-full bg-rose-500 ring-2 ring-[#061408] ${
+                unreadAlertsCount > 0 ? 'scale-100' : 'scale-90 opacity-90'
+              }`}
+            />
+          </motion.button>
         </div>
       </header>
 
-      {/* INSTAGRAM / FACEBOOK STYLE POP-UP NOTIFICATIONS DRAWER */}
-      {isNotifDrawerOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Notifications Feed"
-          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex justify-end"
-        >
-          <div className="w-full max-w-md bg-[#061608] border-l border-white/10 h-full flex flex-col justify-between p-5 sm:p-6 space-y-4 animate-view-enter overflow-y-auto">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-white/10">
-                <div className="flex items-center gap-2.5">
-                  <BellRing className="w-5 h-5 text-[#d0ff45]" />
-                  <div>
-                    <h2 className="text-base og-bold text-white">
-                      Live Pop-Up Notifications
-                    </h2>
-                    <p className="text-[11px] text-zinc-400">
-                      {party.name} · Code {formattedPartyCode}
-                    </p>
+      {/* POP-UP NOTIFICATIONS DRAWER */}
+      <AnimatePresence>
+        {isNotifDrawerOpen && (
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Notifications Feed"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex justify-end"
+          >
+            <motion.div
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', stiffness: 360, damping: 34 }}
+              className="w-full max-w-md bg-[#071609] border-l border-white/10 h-full flex flex-col justify-between p-5 sm:p-6 space-y-4 overflow-y-auto"
+            >
+              <div className="space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                  <div className="flex items-center gap-2.5">
+                    <BellRing className="w-5 h-5 text-[#c8ff2e]" />
+                    <div>
+                      <h2 className="text-base og-bold text-white">Notifications</h2>
+                      <p className="text-[11px] text-zinc-400">
+                        {party.name} · Code {formattedPartyCode}
+                      </p>
+                    </div>
                   </div>
+                  <motion.button
+                    type="button"
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => setIsNotifDrawerOpen(false)}
+                    className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white"
+                  >
+                    <X className="w-4 h-4" />
+                  </motion.button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsNotifDrawerOpen(false)}
-                  className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+
+                <InstallPwaBanner compact />
+
+                <PushAlertsCard
+                  userEmail={currentAccount.email}
+                  userUid={currentAccount.uid}
+                  userDisplayName={currentAccount.displayName}
+                  partyId={party.id}
+                  partyName={party.name}
+                  onTriggerInAppBanner={(banner) => {
+                    setIsNotifDrawerOpen(false);
+                    showSocialPopupNotification({
+                      id: `push_banner_${Date.now()}`,
+                      partyId: party.id,
+                      targetUserId: currentAccount.uid,
+                      targetDisplayName: currentAccount.displayName,
+                      targetEmail: currentAccount.email,
+                      assigneeUserId: currentAccount.uid,
+                      assigneeDisplayName: currentAccount.displayName,
+                      senderName: banner.senderName,
+                      senderPhotoURL: currentAccount.photoURL,
+                      title: banner.title,
+                      category: 'TURN_REMINDER',
+                      type: 'TURN_REMINDER',
+                      message: banner.message,
+                      read: false,
+                      createdAt: new Date().toISOString(),
+                    });
+                  }}
+                />
+
+                {/* Nudge Active Duty Member Action */}
+                <div>
+                  <motion.button
+                    type="button"
+                    whileTap={{ scale: 0.96 }}
+                    onClick={async () => {
+                      setIsNotifDrawerOpen(false);
+                      await handleSendEmailReminder({
+                        recipientUserId: activeAssignee.uid,
+                        type: 'WARNING_5H',
+                      });
+                    }}
+                    className="w-full py-2.5 px-4 rounded-2xl bg-white/10 hover:bg-white/15 text-[#c8ff2e] text-xs og-bold text-center flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Send Turn Nudge to {activeAssignee.displayName}</span>
+                  </motion.button>
+                </div>
+
+                {/* Live Alert Feed Items */}
+                <div className="space-y-2.5 pt-1">
+                  <div className="flex items-center justify-between text-xs text-zinc-400">
+                    <span>Recent Activity ({alerts.length})</span>
+                    {alerts.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleMarkAllAlertsRead}
+                        className="text-[#c8ff2e] hover:underline og-medium flex items-center gap-1"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Mark all read</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {alerts.length === 0 ? (
+                    <div className="p-6 rounded-2xl bg-[#0b1b0d] border border-white/[0.06] text-center space-y-2">
+                      <Bell className="w-6 h-6 text-[#c8ff2e] mx-auto" />
+                      <p className="text-xs og-bold text-white">No Alerts Yet</p>
+                      <p className="text-[11px] text-zinc-400">
+                        Turn reminders, 5-hour warnings, and photo approvals appear here.
+                      </p>
+                    </div>
+                  ) : (
+                    alerts.map((item) => {
+                      const dt = formatDateTimeReadable(item.createdAt);
+                      const isUrgent = item.type === 'MISSED_DEADLINE';
+                      return (
+                        <motion.div
+                          key={item.id}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => showSocialPopupNotification(item)}
+                          className={`p-3.5 rounded-2xl border transition-colors cursor-pointer ${
+                            isUrgent
+                              ? 'bg-rose-950/35 border-rose-500/40'
+                              : 'bg-[#0b1b0d] border-white/10 hover:border-[#c8ff2e]/40'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="text-xs og-bold text-white">
+                              {item.title || `Household Alert · ${item.assigneeDisplayName}`}
+                            </p>
+                            <span className="text-[10px] font-mono text-zinc-400 shrink-0">
+                              {dt.timePart}
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-300 mt-1 leading-relaxed">
+                            {item.message}
+                          </p>
+                        </motion.div>
+                      );
+                    })
+                  )}
+                </div>
               </div>
 
-              {/* Dedicated Android & iOS Install Banner inside Notification Drawer */}
+              <motion.button
+                type="button"
+                whileTap={{ scale: 0.96 }}
+                onClick={() => setIsNotifDrawerOpen(false)}
+                className="w-full py-3 rounded-full bg-white/10 hover:bg-white/15 text-xs og-bold text-white"
+              >
+                Close
+              </motion.button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Main Content Container (Mobile-focused column on phones, wider cards on desktop) */}
+      <main className="relative z-10 max-w-md md:max-w-4xl mx-auto px-5 sm:px-8 pt-3 space-y-5">
+        {authError && (
+          <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
+            {authError}
+          </div>
+        )}
+
+        {celebrationBanner && (
+          <div className="animate-celebration-burst p-3.5 rounded-full bg-[#c8ff2e] text-[#051807] og-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xl">
+            <Sparkles className="w-4 h-4 shrink-0" />
+            <span>{celebrationBanner}</span>
+          </div>
+        )}
+
+        <AnimatePresence mode="wait">
+          {/* TAB 1: MINIMALIST HOME DUTY HUD (Matches Reference Left Screen) */}
+          {activeTab === 'hud' && (
+            <motion.div
+              key="tab-hud"
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.99 }}
+              transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+              className="space-y-4 sm:space-y-5"
+            >
+              {/* 1. Greeting Header Row ("Hello, <Name>" + Circular Lime-Ringed Avatar) */}
+              <div className="flex items-center justify-between gap-4 pt-1">
+                <div className="min-w-0">
+                  <p className="text-base sm:text-lg text-zinc-400 og-regular leading-snug">
+                    Hello,
+                  </p>
+                  <h1 className="text-3xl sm:text-4xl og-bold text-white tracking-tight truncate">
+                    {activeViewer.displayName}
+                  </h1>
+                </div>
+
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.92 }}
+                  onClick={() => setActiveTab('profile')}
+                  data-testid="top-profile-trigger"
+                  aria-label="Open Profile"
+                  className="rounded-full p-0.5 ring-2 ring-[#c8ff2e] shadow-[0_0_20px_rgba(200,255,46,0.22)] shrink-0"
+                >
+                  <MemberAvatar member={activeViewer} size="md" />
+                </motion.button>
+              </div>
+
+              {/* Dedicated Android & iOS Browser Install Prompt (Auto-hides once installed) */}
               <InstallPwaBanner compact />
 
-              {/* Native PWA Background Push Subscription & iOS Home Screen Rule Card */}
-              <PushAlertsCard
-                userEmail={currentAccount.email}
-                userUid={currentAccount.uid}
-                userDisplayName={currentAccount.displayName}
+              {/* Compact Overdue Alert Strip (Only shown if turn is overdue) */}
+              {(party.turnStatus === 'OVERDUE' ||
+                deadlineEvaluation.status === 'OVERDUE') && (
+                <div
+                  data-testid="host-escalation-banner"
+                  className="p-4 rounded-[24px] bg-rose-950/60 border border-rose-500/50 flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-xs sm:text-sm og-bold text-white truncate">
+                        Overdue Turn · {activeAssignee.displayName}
+                      </p>
+                      <p className="text-[11px] text-rose-200/80 truncate">
+                        Upload trash photo now to rotate duty
+                      </p>
+                    </div>
+                  </div>
+                  <motion.button
+                    type="button"
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => setIsScannerOpen(true)}
+                    className="px-3.5 py-2 rounded-full bg-rose-500 text-slate-950 og-bold text-xs shrink-0"
+                  >
+                    Upload Now
+                  </motion.button>
+                </div>
+              )}
+
+              {/* Compact Pending Host Photo Verification Card (Only shown when a photo awaits Host review) */}
+              {pendingApprovalDrops.length > 0 && (
+                <div
+                  data-testid="hud-pending-host-verification-card"
+                  className="bento-stat-card rounded-[24px] p-4 border border-amber-400/45 space-y-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-[#051807] text-[11px] og-bold">
+                      {pendingApprovalDrops.length} Photo Awaiting Verification
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('admin')}
+                      className="text-xs og-medium text-[#c8ff2e] hover:underline"
+                    >
+                      View All →
+                    </button>
+                  </div>
+
+                  {pendingApprovalDrops.slice(0, 2).map((drop) => (
+                    <div
+                      key={drop.id}
+                      className="flex items-center justify-between gap-3 pt-1"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <img
+                          src={
+                            drop.imageUrl ||
+                            generateSimulatedTrashSceneDataUrl({
+                              memberName: drop.userDisplayName,
+                              variant: 'valid_bag_in_bin',
+                            })
+                          }
+                          alt={drop.userDisplayName}
+                          referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            const target = e.currentTarget;
+                            if (!target.dataset.fallbackApplied) {
+                              target.dataset.fallbackApplied = 'true';
+                              target.src = generateSimulatedTrashSceneDataUrl({
+                                memberName: drop.userDisplayName,
+                                variant: 'valid_bag_in_bin',
+                              });
+                            }
+                          }}
+                          className="w-12 h-12 rounded-2xl object-cover border border-white/15 shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs sm:text-sm og-bold text-white truncate">
+                            {drop.userDisplayName}
+                          </p>
+                          <p className="text-[11px] text-zinc-400 truncate">
+                            {drop.locationNote}
+                          </p>
+                        </div>
+                      </div>
+
+                      {isHostOrAdmin ? (
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <motion.button
+                            type="button"
+                            whileTap={{ scale: 0.94 }}
+                            disabled={isVerifyingDropId === drop.id}
+                            data-testid={`hud-approve-drop-${drop.id}`}
+                            onClick={() =>
+                              handleHostVerifyDrop({
+                                dropId: drop.id,
+                                decision: 'APPROVE',
+                              })
+                            }
+                            className="px-3 py-1.5 rounded-full bg-[#c8ff2e] text-[#051807] text-xs og-bold"
+                          >
+                            Approve
+                          </motion.button>
+                          <motion.button
+                            type="button"
+                            whileTap={{ scale: 0.94 }}
+                            disabled={isVerifyingDropId === drop.id}
+                            data-testid={`hud-reject-drop-${drop.id}`}
+                            onClick={() =>
+                              handleHostVerifyDrop({
+                                dropId: drop.id,
+                                decision: 'REJECT',
+                              })
+                            }
+                            className="px-2.5 py-1.5 rounded-full bg-rose-500/20 text-rose-300 text-xs og-medium"
+                          >
+                            Reject
+                          </motion.button>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] font-mono text-amber-300 shrink-0">
+                          Pending Host
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Responsive Main Grid: Mobile Single Stack, Desktop Wider 2-Column Layout */}
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-4 sm:gap-5 items-stretch">
+                {/* Left Column on Desktop (7 cols) / Top on Mobile: Duty HUD Hero Card */}
+                <div className="md:col-span-7 flex flex-col justify-between gap-4 sm:gap-5">
+                  <motion.div
+                    whileTap={{ scale: 0.99 }}
+                    onClick={() => setActiveTab('party')}
+                    className="duty-hud-card rounded-[26px] p-5 sm:p-6 cursor-pointer space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-lg sm:text-xl og-bold text-white tracking-tight">
+                        Duty HUD
+                      </h2>
+                      <span className="px-3 py-1 rounded-full bg-[#2e4015]/90 border border-[#c8ff2e]/40 text-[#c8ff2e] text-xs og-medium">
+                        Trash Duty
+                      </span>
+                    </div>
+
+                    <div className="space-y-0.5">
+                      <p className="text-xs sm:text-sm text-zinc-300/90 og-regular">
+                        Next collection in:
+                      </p>
+                      <div
+                        data-testid="turn-countdown-timer"
+                        className={`text-3xl sm:text-4xl og-bold tracking-tight tabular-nums ${
+                          countdown.isOverdue ? 'text-rose-400' : 'text-[#efc96b]'
+                        }`}
+                      >
+                        {minimalistCountdownText}
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-white/[0.08] flex items-center justify-between text-xs text-zinc-300/90">
+                      <span className="truncate">
+                        On duty:{' '}
+                        <strong
+                          data-testid="active-turn-assignee"
+                          className="text-white og-bold"
+                        >
+                          {activeAssignee.displayName}
+                        </strong>
+                      </span>
+                      <span className="font-mono text-[#c8ff2e] shrink-0">
+                        Code: {formattedPartyCode}
+                      </span>
+                    </div>
+                  </motion.div>
+
+                  {/* Upload Action Card on Desktop (Shown here on md+, and below Bento on mobile) */}
+                  <div className="hidden md:flex bento-stat-card rounded-[28px] p-6 flex-col items-center justify-center gap-4">
+                    <div className="w-12 h-12 rounded-2xl bg-[#c8ff2e]/20 border border-[#c8ff2e]/50 shadow-[0_0_28px_rgba(200,255,46,0.35)] flex items-center justify-center text-[#c8ff2e]">
+                      <svg
+                        className="w-6 h-6"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                        <line x1="10" y1="11" x2="10" y2="17" />
+                        <line x1="14" y1="11" x2="14" y2="17" />
+                      </svg>
+                    </div>
+
+                    <motion.button
+                      type="button"
+                      whileTap={{ scale: 0.96 }}
+                      onClick={() => setIsScannerOpen(true)}
+                      className="lime-cta w-full py-4 px-6 rounded-full og-bold text-base flex items-center justify-center gap-2.5 min-h-[54px]"
+                    >
+                      <Camera className="w-5 h-5" />
+                      <span>Upload Trash Photo</span>
+                    </motion.button>
+                  </div>
+                </div>
+
+                {/* Right Column on Desktop (5 cols) / Middle on Mobile: 2-Column Bento Stats Row */}
+                <div className="md:col-span-5 flex flex-col justify-between gap-4 sm:gap-5">
+                  <div className="grid grid-cols-2 gap-3.5 sm:gap-4">
+                    {/* Left Bento Card: Cycles Completed (Circular SVG Progress Ring) */}
+                    <motion.div
+                      whileTap={{ scale: 0.97 }}
+                      onClick={() => setActiveTab('admin')}
+                      className="bento-stat-card rounded-[26px] p-4 sm:p-5 flex flex-col justify-between min-h-[178px] sm:min-h-[196px] cursor-pointer"
+                    >
+                      <span className="text-xs sm:text-sm og-medium text-zinc-200">
+                        Cycles Completed
+                      </span>
+
+                      <div className="relative w-24 h-24 sm:w-28 sm:h-28 mx-auto my-auto flex items-center justify-center">
+                        <svg
+                          className="w-full h-full -rotate-90"
+                          viewBox="0 0 96 96"
+                        >
+                          <circle
+                            cx="48"
+                            cy="48"
+                            r={ringRadius}
+                            fill="none"
+                            stroke="rgba(255, 255, 255, 0.08)"
+                            strokeWidth="8"
+                          />
+                          <motion.circle
+                            cx="48"
+                            cy="48"
+                            r={ringRadius}
+                            fill="none"
+                            stroke="#c8ff2e"
+                            strokeWidth="8"
+                            strokeLinecap="round"
+                            strokeDasharray={ringCircumference}
+                            initial={{ strokeDashoffset: ringCircumference }}
+                            animate={{ strokeDashoffset: ringDashOffset }}
+                            transition={{
+                              duration: 0.75,
+                              ease: [0.22, 1, 0.36, 1],
+                            }}
+                          />
+                        </svg>
+                        <span className="absolute text-2xl sm:text-3xl og-bold text-white tabular-nums">
+                          {cyclesCompletedValue}
+                        </span>
+                      </div>
+                    </motion.div>
+
+                    {/* Right Bento Card: Current Streak (Interactive Flame Counter + Milestone Progress + Turn Dots) */}
+                    <motion.div
+                      whileTap={{ scale: 0.96 }}
+                      onClick={() => setIsStreakSheetOpen(true)}
+                      data-testid="hud-current-streak-card"
+                      className="bento-stat-card rounded-[26px] p-4 sm:p-5 flex flex-col justify-between min-h-[178px] sm:min-h-[196px] cursor-pointer overflow-hidden"
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs sm:text-sm og-medium text-zinc-200">
+                          Current Streak
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-[#c8ff2e]/15 border border-[#c8ff2e]/30 text-[10px] font-mono og-bold text-[#c8ff2e]">
+                          Best {bestStreakCount}x
+                        </span>
+                      </div>
+
+                      {/* Center Interactive Flame Counter */}
+                      <div className="flex items-center gap-3 my-auto py-1">
+                        <motion.div
+                          key={currentStreakCount}
+                          initial={{ scale: 0.85, rotate: -8 }}
+                          animate={{ scale: 1, rotate: 0 }}
+                          transition={{ type: 'spring', stiffness: 420, damping: 22 }}
+                          className={`w-12 h-12 sm:w-13 sm:h-13 rounded-2xl flex items-center justify-center shrink-0 border ${
+                            currentStreakCount > 0
+                              ? 'bg-[#c8ff2e]/20 border-[#c8ff2e]/55 text-[#c8ff2e] shadow-[0_0_24px_rgba(200,255,46,0.28)]'
+                              : 'bg-white/[0.05] border-white/10 text-zinc-400'
+                          }`}
+                        >
+                          <Flame
+                            className={`w-6 h-6 ${
+                              currentStreakCount > 0 ? 'fill-[#c8ff2e]/30 text-[#c8ff2e]' : ''
+                            }`}
+                          />
+                        </motion.div>
+
+                        <div className="min-w-0">
+                          <div className="flex items-baseline gap-1">
+                            <span
+                              data-testid="hud-streak-counter-value"
+                              className="text-2xl sm:text-3xl og-bold text-white tabular-nums leading-none"
+                            >
+                              {currentStreakCount}
+                            </span>
+                            <span className="text-xs font-mono og-bold text-[#c8ff2e]">
+                              {currentStreakCount === 1 ? 'turn' : 'turns'}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-zinc-400 truncate mt-1">
+                            {currentStreakCount > 0
+                              ? `+${currentStreakCount * 15} streak bonus pts`
+                              : 'Complete on time to ignite'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Milestone Progress Bar + 5 Recent Turn Dots */}
+                      <div className="space-y-2 pt-1">
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
+                            <span>Milestone Goal</span>
+                            <span className="text-[#c8ff2e] og-bold">
+                              {currentStreakCount}/{nextStreakMilestone}x
+                            </span>
+                          </div>
+                          <div className="w-full h-1.5 rounded-full bg-white/[0.08] overflow-hidden">
+                            <motion.div
+                              initial={{ width: 0 }}
+                              animate={{ width: `${streakProgressPct}%` }}
+                              transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
+                              className="h-full rounded-full bg-[#c8ff2e]"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-0.5">
+                          <div className="flex items-center gap-1.5">
+                            {recentTurnDots.map((dot) => (
+                              <span
+                                key={dot.key}
+                                title={dot.label}
+                                className={`w-2.5 h-2.5 rounded-full transition-all ${
+                                  dot.status === 'ON_TIME'
+                                    ? 'bg-[#c8ff2e] shadow-[0_0_8px_rgba(200,255,46,0.65)]'
+                                    : dot.status === 'PENDING'
+                                    ? 'bg-amber-400'
+                                    : dot.status === 'MISSED'
+                                    ? 'bg-rose-400'
+                                    : 'bg-white/15'
+                                }`}
+                              />
+                            ))}
+                          </div>
+                          <span className="text-[10px] text-zinc-400 og-medium">
+                            Details →
+                          </span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  </div>
+
+                  {/* Desktop Quick Household Queue & Invite Code Card (Visible on md+ wider layout) */}
+                  <div className="hidden md:flex bento-stat-card rounded-[26px] p-5 flex-col justify-between gap-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm og-bold text-white">{party.name}</p>
+                        <p className="text-xs text-zinc-400">
+                          {party.members.length} members ·{' '}
+                          {formatRotationDaysLabel(party.rotationIntervalHours)}
+                        </p>
+                      </div>
+                      <motion.button
+                        type="button"
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => {
+                          navigator.clipboard?.writeText(formattedPartyCode).catch(() => {});
+                          setCelebrationBanner(`Copied 6-Char Invite Code: ${formattedPartyCode}`);
+                          setTimeout(() => setCelebrationBanner(null), 2500);
+                        }}
+                        className="px-3 py-1.5 rounded-full bg-[#162a18] border border-[#c8ff2e]/35 text-xs font-mono og-bold text-[#c8ff2e] flex items-center gap-1.5"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>{formattedPartyCode}</span>
+                      </motion.button>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-white/[0.06] text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('party')}
+                        className="text-zinc-300 hover:text-white og-medium"
+                      >
+                        Manage Queue &amp; Invites →
+                      </button>
+                      <button
+                        type="button"
+                        onClick={openHudFiveHourWarningModal}
+                        className="text-[#c8ff2e] hover:underline og-medium"
+                      >
+                        Nudge Duty
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Mobile Upload Action Card (Matches Reference Bottom Card above Dock) */}
+              <div className="md:hidden bento-stat-card rounded-[28px] p-5 flex flex-col items-center justify-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-[#c8ff2e]/20 border border-[#c8ff2e]/50 shadow-[0_0_28px_rgba(200,255,46,0.35)] flex items-center justify-center text-[#c8ff2e]">
+                  <svg
+                    className="w-6 h-6"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M3 6h18" />
+                    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                    <line x1="10" y1="11" x2="10" y2="17" />
+                    <line x1="14" y1="11" x2="14" y2="17" />
+                  </svg>
+                </div>
+
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.96 }}
+                  onClick={() => setIsScannerOpen(true)}
+                  data-testid="hud-open-photo-modal-btn"
+                  className="lime-cta w-full py-4 px-6 rounded-full og-bold text-base flex items-center justify-center gap-2.5 min-h-[54px]"
+                >
+                  <Camera className="w-5 h-5" />
+                  <span>Upload Trash Photo</span>
+                </motion.button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* TAB 2: STANDINGS, HOST PHOTO VERIFICATION & HISTORY (Trophy Icon) */}
+          {activeTab === 'admin' && (
+            <motion.div
+              key="tab-admin"
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.99 }}
+              transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <AdminDashboardView
+                party={party}
+                dropLogs={dropLogs}
+                historyLogs={historyLogs}
+                emailLogs={emailLogs}
+                nowMs={nowMs}
+                isHostOrAdmin={isHostOrAdmin}
+                mailerStatus={mailerStatus}
+                onSaveAppPassword={handleSaveAppPassword}
+                onSendEmailReminder={handleSendEmailReminder}
+                onHostVerifyDrop={({ dropId, decision, hostNote }) =>
+                  handleHostVerifyDrop({ dropId, decision, hostReviewNote: hostNote })
+                }
+                onUpdateTurnDeadline={handleUpdateTurnDeadline}
+                onOpenScanner={() => setIsScannerOpen(true)}
+              />
+            </motion.div>
+          )}
+
+          {/* TAB 3: QUEUE, 6-CHAR INVITE CODE & PARTY SETUP (Grid Icon) */}
+          {activeTab === 'party' && (
+            <motion.div
+              key="tab-party"
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.99 }}
+              transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <PartyManagerView
+                party={party}
+                currentUserId={activeViewer.uid}
+                isHostOrAdmin={isHostOrAdmin}
+                partyInvitations={partyInvitations}
+                onCreateParty={handleCreateHousehold}
+                onJoinExistingPartyByCode={handleJoinHouseholdByCode}
+                onAddRoommateWithEmail={handleAddRoommateWithEmail}
+                onUpdateRotationIntervalHours={handleUpdateRotationIntervalHours}
+                onHostSkipTurn={handleHostSkipTurn}
+                onNudgeActiveAssignee={openHudFiveHourWarningModal}
+                onLeaveParty={handleLeaveParty}
+                onDeleteParty={handleDeleteParty}
+              />
+            </motion.div>
+          )}
+
+          {/* TAB 4: PROFILE, PUSH ALERTS & APP INSTALL (User Icon) */}
+          {activeTab === 'profile' && (
+            <motion.div
+              key="tab-profile"
+              initial={{ opacity: 0, y: 12, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.99 }}
+              transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <ProfileAccountView
+                activeViewer={activeViewer}
                 partyId={party.id}
                 partyName={party.name}
+                firebaseUser={firebaseUser}
+                onUpdateProfile={handleUpdateProfile}
+                onGoogleSignIn={handleGoogleSignIn}
+                onSignOut={handleSignOut}
+                onBackToHud={() => setActiveTab('hud')}
                 onTriggerInAppBanner={(banner) => {
-                  setIsNotifDrawerOpen(false);
                   showSocialPopupNotification({
-                    id: `push_banner_${Date.now()}`,
+                    id: `profile_push_banner_${Date.now()}`,
                     partyId: party.id,
                     targetUserId: currentAccount.uid,
                     targetDisplayName: currentAccount.displayName,
@@ -1530,998 +2173,456 @@ export default function App() {
                   });
                 }}
               />
-
-              {/* OS & Mobile Social Pop-Up Notification Test Card */}
-              <div className="p-3.5 rounded-2xl bg-[#0b210e] border border-[#d0ff45]/35 flex items-center justify-between gap-3">
-                <div className="space-y-0.5">
-                  <p className="text-xs og-bold text-white">
-                    Live Pop-Up &amp; Push Alerts
-                  </p>
-                  <p className="text-[11px] text-zinc-300">
-                    Pops up at the top of your phone &amp; PC screen with sound &amp; vibration like Instagram &amp; Facebook
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  data-testid="test-popup-notification-btn"
-                  onClick={handleEnableBrowserPush}
-                  className="px-3.5 py-2 rounded-full bg-[#d0ff45] text-[#041206] text-xs og-bold shrink-0"
-                >
-                  Test Pop-Up
-                </button>
-              </div>
-
-              {/* Quick Send Nudge to Active Turn Member */}
-              <div className="p-3.5 rounded-2xl bg-[#08190a] border border-white/10 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-xs og-bold text-white truncate">
-                    Nudge {activeAssignee.displayName} (Up Now)
-                  </p>
-                  <p className="text-[11px] text-zinc-400 truncate">
-                    Sends an instant pop-up banner &amp; sound alert right now
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setIsNotifDrawerOpen(false);
-                    await handleSendEmailReminder({
-                      recipientUserId: activeAssignee.uid,
-                      type: 'WARNING_5H',
-                    });
-                  }}
-                  className="px-3.5 py-2 rounded-full bg-white/10 hover:bg-white/15 text-[#d0ff45] text-xs og-bold shrink-0"
-                >
-                  Send Pop-Up
-                </button>
-              </div>
-
-              {/* Live Alert Feed Items */}
-              <div className="space-y-2.5 pt-1">
-                <div className="flex items-center justify-between text-xs text-zinc-400">
-                  <span>Recent Activity ({alerts.length})</span>
-                  {alerts.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleMarkAllAlertsRead}
-                      className="text-[#d0ff45] hover:underline og-medium flex items-center gap-1"
-                    >
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Mark all read</span>
-                    </button>
-                  )}
-                </div>
-
-                {alerts.length === 0 ? (
-                  <div className="p-6 rounded-2xl bg-[#08190a] border border-white/[0.06] text-center space-y-2">
-                    <Bell className="w-6 h-6 text-[#d0ff45] mx-auto" />
-                    <p className="text-xs og-bold text-white">No Pop-Up Alerts Yet</p>
-                    <p className="text-[11px] text-zinc-400">
-                      Turn reminders, 5-hour warnings, and photo approvals will appear here.
-                    </p>
-                  </div>
-                ) : (
-                  alerts.map((item) => {
-                    const dt = formatDateTimeReadable(item.createdAt);
-                    const isUrgent = item.type === 'MISSED_DEADLINE';
-                    return (
-                      <div
-                        key={item.id}
-                        onClick={() => {
-                          showSocialPopupNotification(item);
-                        }}
-                        className={`p-3.5 rounded-2xl border transition-colors cursor-pointer ${
-                          isUrgent
-                            ? 'bg-rose-950/35 border-rose-500/40'
-                            : 'bg-[#08190a] border-white/10 hover:border-[#d0ff45]/40'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-xs og-bold text-white">
-                            {item.title || `Household Alert · ${item.assigneeDisplayName}`}
-                          </p>
-                          <span className="text-[10px] font-mono text-zinc-400 shrink-0">
-                            {dt.timePart}
-                          </span>
-                        </div>
-                        <p className="text-xs text-zinc-300 mt-1 leading-relaxed">
-                          {item.message}
-                        </p>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setIsNotifDrawerOpen(false)}
-              className="w-full py-3 rounded-full bg-white/10 hover:bg-white/15 text-xs og-bold text-white"
-            >
-              Close Notifications
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Main Content Container */}
-      <main className="relative z-10 max-w-6xl mx-auto px-4 sm:px-8 pt-5 space-y-6">
-        {/* Household Context & Active Profile Strip */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-white/[0.08] text-xs og-book text-zinc-400">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-white og-bold">{party.name}</span>
-            <span aria-hidden="true">·</span>
-            <span>
-              6-Char Code:{' '}
-              <strong className="font-mono text-[#d0ff45]">{formattedPartyCode}</strong>
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>
-              Cycle:{' '}
-              <strong className="text-zinc-200">
-                {formatRotationDaysLabel(party.rotationIntervalHours)}
-              </strong>
-            </span>
-            <span aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={() => setIsNotifDrawerOpen(true)}
-              className="inline-flex items-center gap-1 text-[#d0ff45] hover:underline og-medium"
-            >
-              <BellRing className="w-3.5 h-3.5" />
-              <span>Live Pop-Up Alerts Active</span>
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('profile')}
-            data-testid="top-profile-trigger"
-            className="flex items-center gap-2.5 text-zinc-200 hover:text-[#d0ff45] transition-colors"
-          >
-            <MemberAvatar member={activeViewer} size="sm" highlightRing />
-            <span className="og-medium">{activeViewer.displayName}</span>
-            <span className="text-zinc-500 font-mono">({activeViewer.email})</span>
-          </button>
-        </div>
-
-        {authError && (
-          <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
-            {authError}
-          </div>
-        )}
-
-        {celebrationBanner && (
-          <div className="animate-celebration-burst p-4 rounded-full bg-[#d0ff45] text-[#041206] og-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xl">
-            <Sparkles className="w-4 h-4 shrink-0" />
-            <span>{celebrationBanner}</span>
-          </div>
-        )}
-
-        {/* Dedicated Android & iOS Browser Detection & Install App Banner */}
-        <InstallPwaBanner compact />
-
-        {/* TAB 1: DUTY HUD */}
-        {activeTab === 'hud' && (
-          <div className="animate-view-enter space-y-6">
-            {/* Native PWA Lock-Screen Push Toggle & iOS Home Screen Guide on Main Duty HUD */}
-            <PushAlertsCard
-              userEmail={currentAccount.email}
-              userUid={currentAccount.uid}
-              userDisplayName={currentAccount.displayName}
-              partyId={party.id}
-              partyName={party.name}
-              compact
-              onTriggerInAppBanner={(banner) => {
-                showSocialPopupNotification({
-                  id: `hud_push_banner_${Date.now()}`,
-                  partyId: party.id,
-                  targetUserId: currentAccount.uid,
-                  targetDisplayName: currentAccount.displayName,
-                  targetEmail: currentAccount.email,
-                  assigneeUserId: currentAccount.uid,
-                  assigneeDisplayName: currentAccount.displayName,
-                  senderName: banner.senderName,
-                  senderPhotoURL: currentAccount.photoURL,
-                  title: banner.title,
-                  category: 'TURN_REMINDER',
-                  type: 'TURN_REMINDER',
-                  message: banner.message,
-                  read: false,
-                  createdAt: new Date().toISOString(),
-                });
-              }}
-            />
-
-            {/* Overdue Host Escalation Banner */}
-            {(party.turnStatus === 'OVERDUE' || deadlineEvaluation.status === 'OVERDUE') && (
-              <div
-                data-testid="host-escalation-banner"
-                className="animate-view-enter p-5 rounded-[28px] bg-rose-950/55 border border-rose-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-              >
-                <div className="flex items-start gap-3.5">
-                  <AlertTriangle className="w-6 h-6 text-rose-400 shrink-0 mt-0.5" />
-                  <div>
-                    <h2 className="text-base og-bold text-white">
-                      Missed Trash Deadline — Overdue Pop-Up Alert Sent to{' '}
-                      {activeAssignee.displayName} &amp; Host {partyHost.displayName}
-                    </h2>
-                    <p className="text-xs og-light text-rose-200/90 mt-1">
-                      {activeAssignee.displayName} missed the scheduled trash deadline. An instant
-                      overdue pop-up notification was triggered for{' '}
-                      <strong className="font-mono">{activeAssignee.email}</strong> and logged in
-                      the Host Admin History Database.
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setIsScannerOpen(true)}
-                    className="px-4 py-2.5 rounded-full bg-rose-500 hover:bg-rose-400 text-slate-950 og-bold text-xs whitespace-nowrap"
-                  >
-                    Upload Late Photo (60 pts)
-                  </button>
-                  {isHostOrAdmin && (
-                    <button
-                      type="button"
-                      onClick={handleHostSkipTurn}
-                      className="px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/15 text-white og-medium text-xs whitespace-nowrap"
-                    >
-                      Host: Rotate Next
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* 5-Hour Advance Warning Banner */}
-            {deadlineEvaluation.status === 'DUE_SOON' && (
-              <div className="animate-view-enter p-4 rounded-[24px] bg-[#142a15] border border-[#d0ff45]/45 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <BellRing className="w-5 h-5 text-[#d0ff45] shrink-0" />
-                  <div className="text-xs">
-                    <p className="og-bold text-white">
-                      5-Hour Warning Window Active — Instant Pop-Up Alert Delivered to{' '}
-                      <span className="text-[#d0ff45] font-mono">{activeAssignee.displayName}</span>
-                    </p>
-                    <p className="og-light text-zinc-300 mt-0.5">
-                      Less than 5 hours remain before this turn expires. Upload your trash photo on
-                      time to keep your streak!
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsNotifDrawerOpen(true)}
-                  className="text-xs og-bold text-[#d0ff45] underline whitespace-nowrap shrink-0"
-                >
-                  View Pop-Up Alert →
-                </button>
-              </div>
-            )}
-
-            {/* Pending Host Photo Verification Banner (whenever photos await Host approval) */}
-            {pendingApprovalDrops.length > 0 && (
-              <div
-                data-testid="hud-pending-host-verification-card"
-                className="glass-panel-elevated rounded-[28px] p-5 border border-amber-400/45 space-y-4"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <span className="px-2.5 py-1 rounded-full bg-amber-400 text-[#041206] text-xs og-bold">
-                      {pendingApprovalDrops.length} Pending Host Verification
-                    </span>
-                    <h2 className="text-sm sm:text-base og-bold text-white">
-                      Submitted Trash Disposal Photo(s) Awaiting Host Review
-                    </h2>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('admin')}
-                    className="text-xs og-bold text-[#d0ff45] hover:underline"
-                  >
-                    Open Full Admin Review Queue →
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {pendingApprovalDrops.map((drop) => {
-                    const dt = formatDateTimeReadable(drop.submittedIso || drop.createdAt);
-                    return (
-                      <div
-                        key={drop.id}
-                        className="p-4 rounded-2xl bg-[#07190a] border border-amber-400/30 flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between"
-                      >
-                        <div className="flex items-center gap-3.5 min-w-0">
-                          <img
-                            src={drop.imageUrl}
-                            alt={`Submitted by ${drop.userDisplayName}`}
-                            referrerPolicy="no-referrer"
-                            className="w-20 h-20 rounded-xl object-cover border border-white/15 shrink-0"
-                          />
-                          <div className="min-w-0 space-y-1">
-                            <p className="text-sm og-bold text-white truncate">
-                              {drop.userDisplayName}
-                            </p>
-                            <p className="text-[11px] font-mono text-zinc-400 truncate">
-                              {dt.datePart} · {dt.timePart}
-                            </p>
-                            <p className="text-xs text-zinc-300 truncate">{drop.locationNote}</p>
-                          </div>
-                        </div>
-
-                        {isHostOrAdmin ? (
-                          <div className="flex sm:flex-col gap-2 w-full sm:w-auto shrink-0">
-                            <button
-                              type="button"
-                              disabled={isVerifyingDropId === drop.id}
-                              data-testid={`hud-approve-drop-${drop.id}`}
-                              onClick={() =>
-                                handleHostVerifyDrop({
-                                  dropId: drop.id,
-                                  decision: 'APPROVE',
-                                })
-                              }
-                              className="flex-1 px-3.5 py-2 rounded-xl bg-[#d0ff45] hover:bg-[#dcff6b] text-[#041206] text-xs og-bold flex items-center justify-center gap-1.5 whitespace-nowrap"
-                            >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span>Verify &amp; Approve</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={isVerifyingDropId === drop.id}
-                              data-testid={`hud-reject-drop-${drop.id}`}
-                              onClick={() =>
-                                handleHostVerifyDrop({
-                                  dropId: drop.id,
-                                  decision: 'REJECT',
-                                })
-                              }
-                              className="px-3.5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 text-rose-300 text-xs og-medium flex items-center justify-center gap-1.5 whitespace-nowrap"
-                            >
-                              <XCircle className="w-3.5 h-3.5" />
-                              <span>Reject</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-xs font-mono text-amber-300 shrink-0">
-                            Waiting for Host {partyHost.displayName}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Primary 2-Column Split: Active Turn HUD + Rotation Queue */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-              {/* Left 7 Columns: Active Turn Command Card */}
-              <div className="lg:col-span-7 glass-panel-elevated rounded-[32px] p-6 sm:p-8 flex flex-col justify-between space-y-6">
-                <div className="space-y-5">
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs og-book text-zinc-400">
-                    <span>
-                      Turn #{party.currentTurnIndex + 1} of {party.members.length} ·{' '}
-                      {party.turnStatus === 'OVERDUE' ||
-                      deadlineEvaluation.status === 'OVERDUE' ? (
-                        <strong className="text-rose-400 og-bold">OVERDUE (POP-UP SENT)</strong>
-                      ) : deadlineEvaluation.status === 'DUE_SOON' ? (
-                        <strong className="text-[#d0ff45] og-bold">5-HOUR WARNING ACTIVE</strong>
-                      ) : (
-                        <strong className="text-[#d0ff45] og-bold">ACTIVE DUTY</strong>
-                      )}
-                    </span>
-                    <span className="font-mono tabular-nums">
-                      Cycle: {formatRotationDaysLabel(party.rotationIntervalHours)} · Verified Drops:{' '}
-                      {party.totalPartyDrops}
-                    </span>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="flex items-center gap-4">
-                      <MemberAvatar member={activeAssignee} size="lg" highlightRing />
-                      <div className="space-y-1">
-                        <p className="text-xs og-light text-zinc-400">Roommate On Trash Duty</p>
-                        <h1
-                          data-testid="active-turn-assignee"
-                          className="text-2xl sm:text-3xl og-bold text-white tracking-tight"
-                        >
-                          {activeAssignee.displayName}
-                        </h1>
-                        <p className="text-xs text-[#d0ff45] font-mono">
-                          {activeAssignee.email}
-                        </p>
-                        <p className="text-xs text-zinc-300 font-mono tabular-nums">
-                          {activeAssignee.points} pts · {activeAssignee.totalDrops} verified drops ·{' '}
-                          {activeAssignee.currentStreak}x streak
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Countdown Timer Readout */}
-                    <div className="text-left sm:text-right">
-                      <span className="text-[11px] og-light text-zinc-400 flex items-center sm:justify-end gap-1.5">
-                        <Clock className="w-3.5 h-3.5 text-[#d0ff45]" />
-                        {countdown.isOverdue ? 'Time Past Deadline' : 'Turn Deadline Countdown'}
-                      </span>
-                      <div
-                        data-testid="turn-countdown-timer"
-                        className={`text-2xl sm:text-3xl og-bold font-mono tabular-nums mt-1 ${
-                          countdown.isOverdue ? 'text-rose-400' : 'text-[#d0ff45]'
-                        }`}
-                      >
-                        {countdown.isOverdue ? '-' : ''}
-                        {countdown.hours}:{countdown.minutes}:{countdown.seconds}
-                      </div>
-                      <span className="text-[11px] og-light text-zinc-400 block mt-0.5">
-                        Live Pop-Up &amp; Push Alerts Active for {activeAssignee.displayName}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Primary Pill CTA */}
-                <div className="pt-5 border-t border-white/10 space-y-4">
-                  <div className="space-y-1">
-                    <h2 className="text-sm og-medium text-white">
-                      Photo Proof &amp; Host Verification
-                    </h2>
-                    <p className="text-xs og-light text-zinc-400">
-                      Snap or upload a photo of the trash bag at the outdoor bin/dumpster. Once the
-                      Party Host verifies the photo, points are awarded and the turn rotates to the
-                      next roommate.
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setIsScannerOpen(true)}
-                    data-testid="hud-open-photo-modal-btn"
-                    className="lime-cta w-full py-4 px-6 rounded-full og-bold text-sm flex items-center justify-center gap-2 min-h-[52px]"
-                  >
-                    <Camera className="w-4 h-4" />
-                    <span>Snap &amp; Upload Trash Disposal Photo</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Instant Pop-Up Notification & Host Action Bar */}
-                <div className="pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-2.5">
-                  <button
-                    type="button"
-                    onClick={openHudFiveHourWarningModal}
-                    data-testid="hud-mail-warning-btn"
-                    className="min-h-[42px] px-4 py-2 rounded-full bg-[#091c0b] hover:bg-[#112914] border border-white/10 text-xs og-medium text-zinc-200 flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <BellRing className="w-3.5 h-3.5 text-[#d0ff45]" />
-                    Send Pop-Up Alert to {activeAssignee.displayName}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('admin')}
-                    className="min-h-[42px] px-4 py-2 rounded-full bg-[#091c0b] hover:bg-[#112914] border border-[#d0ff45]/30 text-xs og-medium text-[#d0ff45] flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <Database className="w-3.5 h-3.5" />
-                    Open Admin Photo DB &amp; History
-                  </button>
-
-                  {isHostOrAdmin && (
-                    <button
-                      type="button"
-                      onClick={handleHostSkipTurn}
-                      className="min-h-[42px] px-4 py-2 rounded-full bg-[#091c0b] hover:bg-[#112914] border border-white/10 text-xs og-medium text-zinc-300 flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-                    >
-                      <SkipForward className="w-3.5 h-3.5" />
-                      Host: Rotate Turn
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Right 5 Columns: Household Rotation Queue + 1-to-7 Day Schedule Switcher */}
-              <div className="lg:col-span-5 glass-panel rounded-[32px] p-6 flex flex-col justify-between space-y-5">
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h2 className="text-base og-bold text-white">Turn Rotation Queue</h2>
-                      <p className="text-xs og-light text-zinc-400">
-                        Household accounts &amp; turn order
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('party')}
-                      className="text-xs og-bold text-[#d0ff45] hover:underline whitespace-nowrap shrink-0"
-                    >
-                      + Manage Party
-                    </button>
-                  </div>
-
-                  <div className="divide-y divide-white/[0.08]">
-                    {party.members.map((member, index) => {
-                      const offset =
-                        (index - party.currentTurnIndex + party.members.length) %
-                        party.members.length;
-                      const isUpNow = offset === 0;
-                      const isUpNext = offset === 1;
-
-                      return (
-                        <div
-                          key={member.uid}
-                          className={`py-3 px-3 rounded-2xl transition-colors ${
-                            isUpNow ? 'bg-[#d0ff45]/10' : ''
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3 min-w-0">
-                              <MemberAvatar member={member} size="sm" highlightRing={isUpNow} />
-                              <div className="min-w-0">
-                                <p className="text-sm og-bold text-white truncate">
-                                  {member.displayName}{' '}
-                                  {member.role === 'HOST' && (
-                                    <span className="text-xs og-book text-[#d0ff45]">
-                                      · Host
-                                    </span>
-                                  )}
-                                </p>
-                                <p className="text-[11px] text-zinc-400 font-mono truncate">
-                                  {member.email}
-                                </p>
-                                <p className="text-[11px] text-zinc-500 font-mono tabular-nums">
-                                  {member.points} pts · {member.onTimeDrops} on-time ·{' '}
-                                  {member.missedDrops} missed
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="text-right shrink-0">
-                              {isUpNow ? (
-                                <span className="text-xs og-bold text-[#d0ff45]">Up Now</span>
-                              ) : isUpNext ? (
-                                <span className="text-xs og-medium text-zinc-200">Up Next</span>
-                              ) : (
-                                <span className="text-xs font-mono text-zinc-500 tabular-nums">
-                                  In {offset} turns
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* 1-to-7 Day Rotation Selector directly on the Queue Card */}
-                <div className="pt-3 border-t border-white/[0.08] space-y-2.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="inline-flex items-center gap-1.5 og-medium text-zinc-300">
-                      <Calendar className="w-3.5 h-3.5 text-[#d0ff45]" />
-                      <span>Rotation Cycle (1 to 7 Days):</span>
-                    </span>
-                    <span
-                      data-testid="active-rotation-days-label"
-                      className="font-mono og-bold text-[#d0ff45]"
-                    >
-                      {formatRotationDaysLabel(party.rotationIntervalHours)}
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-7 gap-1.5">
-                    {ROTATION_DAY_OPTIONS.map((opt) => {
-                      const isSelected = party.rotationIntervalHours === opt.hours;
-                      return (
-                        <button
-                          key={opt.days}
-                          type="button"
-                          data-testid={`hud-rotation-day-${opt.days}`}
-                          onClick={() => handleUpdateRotationIntervalHours(opt.hours)}
-                          className={`py-1.5 rounded-xl text-xs og-bold transition-all border ${
-                            isSelected
-                              ? 'bg-[#d0ff45] text-[#041206] border-[#d0ff45] scale-105'
-                              : 'bg-[#091c0b] text-zinc-300 border-white/10 hover:border-[#d0ff45]/40'
-                          }`}
-                        >
-                          {opt.shortLabel}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Bottom 2-Column Grid: Household Standings & Recent Timestamped Photos */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Household Leaderboard Snapshot (5 cols) */}
-              <div className="lg:col-span-5 glass-panel rounded-[32px] p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-base og-bold text-white">Household Standings</h2>
-                    <p className="text-xs og-light text-zinc-400">
-                      Ranked by Host-verified trash disposal points
-                    </p>
-                  </div>
-                </div>
-
-                <div className="space-y-2.5">
-                  {sortedLeaderboard.map((member, idx) => (
-                    <div
-                      key={member.uid}
-                      className="p-3.5 rounded-2xl bg-[#08190a] border border-white/[0.07]"
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3 min-w-0">
-                          <span className="font-mono og-bold text-xs text-zinc-400 w-5">
-                            #{idx + 1}
-                          </span>
-                          <MemberAvatar member={member} size="sm" />
-                          <div className="min-w-0">
-                            <p className="text-xs og-bold text-white truncate">
-                              {member.displayName}
-                            </p>
-                            <p className="text-[11px] text-zinc-400 font-mono truncate">
-                              {member.onTimeDrops} on-time · {member.missedDrops} missed
-                            </p>
-                          </div>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <span className="text-sm og-bold font-mono text-[#d0ff45] tabular-nums">
-                            {member.points} pts
-                          </span>
-                          <span className="block text-[10px] text-zinc-400 font-mono flex items-center justify-end gap-1">
-                            <Flame className="w-3 h-3 text-[#d0ff45]" />
-                            {member.currentStreak}x
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Recent Proof-of-Work Drops with Date, Time & Host Verification Status (7 cols) */}
-              <div className="lg:col-span-7 glass-panel rounded-[32px] p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-base og-bold text-white">
-                      Latest Timestamped Trash Photos
-                    </h2>
-                    <p className="text-xs og-light text-zinc-400">
-                      Saved in Firebase &amp; Host Admin Database by exact date and time
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('admin')}
-                    className="text-xs og-bold text-[#d0ff45] hover:underline whitespace-nowrap shrink-0"
-                  >
-                    Open Full Admin DB ({dropLogs.length}) →
-                  </button>
-                </div>
-
-                {dropLogs.length === 0 ? (
-                  <div className="p-8 rounded-2xl bg-[#08190a] border border-white/[0.08] text-center space-y-3">
-                    <Camera className="w-7 h-7 text-[#d0ff45] mx-auto" />
-                    <p className="text-sm og-bold text-white">
-                      No Trash Photos Submitted Yet
-                    </p>
-                    <p className="text-xs og-light text-zinc-400 max-w-sm mx-auto">
-                      Tap &ldquo;Snap &amp; Upload Trash Disposal Photo&rdquo; to upload a photo for
-                      Host verification and record it in the timestamped database.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {dropLogs.slice(0, 4).map((drop) => {
-                      const dt = formatDateTimeReadable(drop.submittedIso || drop.createdAt);
-                      return (
-                        <div
-                          key={drop.id}
-                          className="rounded-2xl overflow-hidden bg-[#08190a] border border-white/[0.08] flex flex-col justify-between"
-                        >
-                          <div className="relative h-36 bg-[#041206]">
-                            <img
-                              src={drop.imageUrl}
-                              alt={`Trash drop by ${drop.userDisplayName}`}
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover"
-                            />
-                            <div className="absolute top-2.5 right-2.5">
-                              {drop.verificationStatus === 'VERIFIED' ? (
-                                <span className="px-2.5 py-1 rounded-full bg-[#d0ff45] text-[#041206] text-[10px] og-bold">
-                                  Host Verified
-                                </span>
-                              ) : drop.verificationStatus === 'REJECTED' ? (
-                                <span className="px-2.5 py-1 rounded-full bg-rose-500 text-white text-[10px] og-bold">
-                                  Rejected
-                                </span>
-                              ) : (
-                                <span className="px-2.5 py-1 rounded-full bg-amber-400 text-[#041206] text-[10px] og-bold">
-                                  Pending Host Review
-                                </span>
-                              )}
-                            </div>
-                            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent p-3 flex items-center justify-between text-xs">
-                              <span className="og-bold text-white">
-                                {drop.userDisplayName}
-                              </span>
-                              <span className="font-mono og-bold text-[#d0ff45] tabular-nums">
-                                {drop.verificationStatus === 'VERIFIED'
-                                  ? `+${drop.pointsAwarded} pts`
-                                  : 'Awaiting Host'}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="p-3.5 space-y-2">
-                            <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono tabular-nums">
-                              <span className="flex items-center gap-1 text-[#d0ff45]">
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                {dt.datePart} · {dt.timePart}
-                              </span>
-                              <span>{drop.completedOnTime ? 'On-Time' : 'Late'}</span>
-                            </div>
-                            <p className="text-xs og-medium text-zinc-200 truncate">
-                              {drop.locationNote}
-                            </p>
-                            {isHostOrAdmin &&
-                              drop.verificationStatus === 'PENDING_HOST_APPROVAL' && (
-                                <div className="flex items-center gap-2 pt-1">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleHostVerifyDrop({
-                                        dropId: drop.id,
-                                        decision: 'APPROVE',
-                                      })
-                                    }
-                                    className="flex-1 py-1.5 rounded-lg bg-[#d0ff45] text-[#041206] text-xs og-bold"
-                                  >
-                                    Approve
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleHostVerifyDrop({
-                                        dropId: drop.id,
-                                        decision: 'REJECT',
-                                      })
-                                    }
-                                    className="py-1.5 px-2.5 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs og-medium"
-                                  >
-                                    Reject
-                                  </button>
-                                </div>
-                              )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 2: HOST ADMIN VIEW & COMPLIANCE HISTORY DATABASE */}
-        {activeTab === 'admin' && (
-          <AdminDashboardView
-            party={party}
-            dropLogs={dropLogs}
-            historyLogs={historyLogs}
-            emailLogs={emailLogs}
-            nowMs={nowMs}
-            isHostOrAdmin={isHostOrAdmin}
-            mailerStatus={mailerStatus}
-            onSaveAppPassword={handleSaveAppPassword}
-            onSendEmailReminder={handleSendEmailReminder}
-            onHostVerifyDrop={({ dropId, decision, hostNote }) =>
-              handleHostVerifyDrop({ dropId, decision, hostReviewNote: hostNote })
-            }
-            onUpdateTurnDeadline={handleUpdateTurnDeadline}
-            onOpenScanner={() => setIsScannerOpen(true)}
-          />
-        )}
-
-        {/* TAB 3: PARTY SETUP, ROOMMATE ENROLLMENT, LEAVE & DELETE PARTY */}
-        {activeTab === 'party' && (
-          <PartyManagerView
-            party={party}
-            currentUserId={activeViewer.uid}
-            isHostOrAdmin={isHostOrAdmin}
-            partyInvitations={partyInvitations}
-            onCreateParty={handleCreateHousehold}
-            onJoinExistingPartyByCode={handleJoinHouseholdByCode}
-            onAddRoommateWithEmail={handleAddRoommateWithEmail}
-            onUpdateRotationIntervalHours={handleUpdateRotationIntervalHours}
-            onLeaveParty={handleLeaveParty}
-            onDeleteParty={handleDeleteParty}
-          />
-        )}
-
-        {/* TAB 4: PROFILE & ACCOUNT SETTINGS */}
-        {activeTab === 'profile' && (
-          <ProfileAccountView
-            activeViewer={activeViewer}
-            firebaseUser={firebaseUser}
-            onUpdateProfile={handleUpdateProfile}
-            onGoogleSignIn={handleGoogleSignIn}
-            onSignOut={handleSignOut}
-            onBackToHud={() => setActiveTab('hud')}
-          />
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
 
       {/* HUD Instant Pop-Up Notification Modal */}
-      {hudEmailConfirmOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
-        >
-          <div className="glass-panel-elevated w-full max-w-lg rounded-[32px] p-6 space-y-4 border border-[#d0ff45]/35 max-h-[92vh] overflow-y-auto">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <span className="text-xs font-mono text-[#d0ff45]">
-                  Live Social Pop-Up &amp; Browser Push · {party.name}
-                </span>
-                <h3 className="text-lg og-bold text-white mt-0.5">
-                  Send Pop-Up Alert to {activeAssignee.displayName}
-                </h3>
+      <AnimatePresence>
+        {hudEmailConfirmOpen && (
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 14 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 14 }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+              className="glass-panel-elevated w-full max-w-lg rounded-[32px] p-6 space-y-4 border border-[#c8ff2e]/35 max-h-[92vh] overflow-y-auto"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <span className="text-xs font-mono text-[#c8ff2e]">
+                    Live Pop-Up &amp; Push Alert · {party.name}
+                  </span>
+                  <h3 className="text-lg og-bold text-white mt-0.5">
+                    Send Pop-Up Alert to {activeAssignee.displayName}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setHudEmailConfirmOpen(false)}
+                  className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setHudEmailConfirmOpen(false)}
-                className="p-2 rounded-full bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
 
-            <div className="p-3.5 rounded-2xl bg-[#07190a] border border-white/10 text-xs space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Household Party:</span>
-                <span className="font-mono text-[#d0ff45] og-bold">
-                  {party.name} ({formattedPartyCode})
-                </span>
+              <div className="space-y-1">
+                <label className="block text-xs og-medium text-zinc-300">Pop-Up Title</label>
+                <input
+                  type="text"
+                  value={hudEmailSubject}
+                  onChange={(e) => setHudEmailSubject(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#07190a] border border-white/15 text-xs text-white focus:outline-none focus:border-[#c8ff2e]"
+                />
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Recipient:</span>
-                <span className="font-mono text-white og-bold">
-                  {activeAssignee.displayName} &lt;{activeAssignee.email}&gt;
-                </span>
+
+              <div className="space-y-1">
+                <label className="block text-xs og-medium text-zinc-300">Pop-Up Message</label>
+                <textarea
+                  rows={4}
+                  value={hudEmailBody}
+                  onChange={(e) => setHudEmailBody(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#07190a] border border-white/15 text-xs text-white font-sans focus:outline-none focus:border-[#c8ff2e]"
+                />
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-400">Notification Mode:</span>
-                <span className="font-mono text-[#d0ff45] og-bold">
-                  IN-APP POP-UP BANNER + BROWSER PUSH
-                </span>
-              </div>
-            </div>
 
-            <div className="space-y-1">
-              <label className="block text-xs og-medium text-zinc-300">Pop-Up Title</label>
-              <input
-                type="text"
-                value={hudEmailSubject}
-                onChange={(e) => setHudEmailSubject(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#07190a] border border-white/15 text-xs text-white focus:outline-none focus:border-[#d0ff45]"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="block text-xs og-medium text-zinc-300">Pop-Up Message</label>
-              <textarea
-                rows={4}
-                value={hudEmailBody}
-                onChange={(e) => setHudEmailBody(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#07190a] border border-white/15 text-xs text-white font-sans focus:outline-none focus:border-[#d0ff45]"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={() => setHudEmailConfirmOpen(false)}
-                className="px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 text-xs og-medium text-zinc-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isSendingHudEmail}
-                data-testid="confirm-hud-send-email-btn"
-                onClick={async () => {
-                  setIsSendingHudEmail(true);
-                  try {
-                    const result = await handleSendEmailReminder({
-                      recipientUserId: activeAssignee.uid,
-                      type: 'WARNING_5H',
-                      customSubject: hudEmailSubject,
-                      customMessage: hudEmailBody,
-                    });
-                    if (result.deliveredViaGmail) {
-                      setHudEmailConfirmOpen(false);
-                    } else if (result.error) {
-                      setAuthError(result.error);
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setHudEmailConfirmOpen(false)}
+                  className="px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 text-xs og-medium text-zinc-300"
+                >
+                  Cancel
+                </button>
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.96 }}
+                  disabled={isSendingHudEmail}
+                  data-testid="confirm-hud-send-email-btn"
+                  onClick={async () => {
+                    setIsSendingHudEmail(true);
+                    try {
+                      const result = await handleSendEmailReminder({
+                        recipientUserId: activeAssignee.uid,
+                        type: 'WARNING_5H',
+                        customSubject: hudEmailSubject,
+                        customMessage: hudEmailBody,
+                      });
+                      if (result.deliveredViaGmail) {
+                        setHudEmailConfirmOpen(false);
+                      } else if (result.error) {
+                        setAuthError(result.error);
+                      }
+                    } finally {
+                      setIsSendingHudEmail(false);
                     }
-                  } finally {
-                    setIsSendingHudEmail(false);
-                  }
-                }}
-                className="lime-cta px-5 py-2.5 rounded-full text-xs og-bold flex items-center gap-1.5"
-              >
-                <Send className="w-3.5 h-3.5" />
-                <span>
-                  {isSendingHudEmail
-                    ? 'Sending Pop-Up...'
-                    : `Send Pop-Up to ${activeAssignee.displayName}`}
-                </span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                  }}
+                  className="lime-cta px-5 py-2.5 rounded-full text-xs og-bold flex items-center gap-1.5"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>
+                    {isSendingHudEmail
+                      ? 'Sending...'
+                      : `Send Pop-Up to ${activeAssignee.displayName}`}
+                  </span>
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Mobile Bottom Navigation Bar */}
+      {/* INTERACTIVE STREAK BREAKDOWN SHEET MODAL */}
+      <AnimatePresence>
+        {isStreakSheetOpen && (
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Current Streak Breakdown"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsStreakSheetOpen(false)}
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ y: 48, scale: 0.97 }}
+              animate={{ y: 0, scale: 1 }}
+              exit={{ y: 48, scale: 0.97 }}
+              transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+              onClick={(e) => e.stopPropagation()}
+              data-testid="streak-breakdown-sheet"
+              className="w-full max-w-lg rounded-t-[32px] sm:rounded-[32px] bg-[#091a0b] border border-white/12 p-6 space-y-5 max-h-[88vh] overflow-y-auto shadow-[0_24px_70px_rgba(0,0,0,0.92)]"
+            >
+              {/* Top Header */}
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-2xl bg-[#c8ff2e]/20 border border-[#c8ff2e]/50 flex items-center justify-center text-[#c8ff2e] shrink-0">
+                    <Flame className="w-6 h-6 fill-[#c8ff2e]/30" />
+                  </div>
+                  <div>
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-[#c8ff2e] og-bold">
+                      {activeViewer.displayName} · Streak Breakdown
+                    </span>
+                    <h3 className="text-xl og-bold text-white">
+                      {currentStreakCount} Turn On-Time Streak
+                    </h3>
+                  </div>
+                </div>
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.9 }}
+                  onClick={() => setIsStreakSheetOpen(false)}
+                  aria-label="Close Streak Sheet"
+                  className="p-2 rounded-full bg-white/[0.06] hover:bg-white/[0.12] text-zinc-400 hover:text-white"
+                >
+                  <X className="w-4 h-4" />
+                </motion.button>
+              </div>
+
+              {/* 4-Stat KPI Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="p-3.5 rounded-2xl bg-[#0f2412] border border-[#c8ff2e]/30">
+                  <span className="text-[10px] font-mono uppercase text-zinc-400 block">
+                    Current Streak
+                  </span>
+                  <span className="text-lg og-bold text-[#c8ff2e] font-mono tabular-nums mt-0.5 block">
+                    {currentStreakCount}x
+                  </span>
+                </div>
+                <div className="p-3.5 rounded-2xl bg-white/[0.04] border border-white/[0.08]">
+                  <span className="text-[10px] font-mono uppercase text-zinc-400 block">
+                    Best Streak
+                  </span>
+                  <span className="text-lg og-bold text-white font-mono tabular-nums mt-0.5 block">
+                    {bestStreakCount}x
+                  </span>
+                </div>
+                <div className="p-3.5 rounded-2xl bg-white/[0.04] border border-white/[0.08]">
+                  <span className="text-[10px] font-mono uppercase text-zinc-400 block">
+                    On-Time Rate
+                  </span>
+                  <span className="text-lg og-bold text-white font-mono tabular-nums mt-0.5 block">
+                    {activeViewer.onTimeRate}%
+                  </span>
+                </div>
+                <div className="p-3.5 rounded-2xl bg-white/[0.04] border border-white/[0.08]">
+                  <span className="text-[10px] font-mono uppercase text-zinc-400 block">
+                    Total Points
+                  </span>
+                  <span className="text-lg og-bold text-[#c8ff2e] font-mono tabular-nums mt-0.5 block">
+                    {activeViewer.points}
+                  </span>
+                </div>
+              </div>
+
+              {/* Milestone Progress & Bonus Multiplier Card */}
+              <div className="p-4 rounded-2xl bg-[#0d2010] border border-white/10 space-y-2.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="og-bold text-white">
+                    Next Milestone: {nextStreakMilestone}x Streak
+                  </span>
+                  <span className="font-mono text-[#c8ff2e] og-bold">
+                    +{nextTurnPotentialPoints} pts on next on-time drop
+                  </span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-black/40 overflow-hidden">
+                  <motion.div
+                    initial={{ width: 0 }}
+                    animate={{ width: `${streakProgressPct}%` }}
+                    transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+                    className="h-full rounded-full bg-[#c8ff2e]"
+                  />
+                </div>
+                <p className="text-[11px] text-zinc-400">
+                  Every verified on-time trash drop awards <strong className="text-white">+100 base pts</strong> plus <strong className="text-[#c8ff2e]">+15 pts per consecutive streak turn</strong>.
+                </p>
+              </div>
+
+              {/* Recent Turns Timeline */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="og-bold text-white">Recent Turn Activity</span>
+                  <span className="text-zinc-400 font-mono">
+                    {historyLogs.length} logged turns
+                  </span>
+                </div>
+
+                {historyLogs.length === 0 ? (
+                  <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/[0.07] text-center space-y-1.5">
+                    <p className="text-xs og-bold text-white">No Turns Logged Yet</p>
+                    <p className="text-[11px] text-zinc-400">
+                      Upload a trash disposal photo before the deadline to start your streak!
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    {historyLogs.slice(0, 6).map((rec) => {
+                      const dt = formatDateTimeReadable(rec.recordedIso);
+                      const isOnTime = rec.outcome === 'ON_TIME';
+                      const isMissed =
+                        rec.outcome === 'MISSED_DEADLINE' ||
+                        rec.outcome === 'COMPLETED_LATE';
+                      return (
+                        <div
+                          key={rec.id}
+                          className="p-3 rounded-2xl bg-white/[0.04] border border-white/[0.08] flex items-center justify-between gap-3"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span
+                              className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                                isOnTime
+                                  ? 'bg-[#c8ff2e]'
+                                  : isMissed
+                                  ? 'bg-rose-400'
+                                  : 'bg-zinc-500'
+                              }`}
+                            />
+                            <div className="min-w-0">
+                              <p className="text-xs og-bold text-white truncate">
+                                {rec.userDisplayName}
+                              </p>
+                              <p className="text-[11px] text-zinc-400 font-mono truncate">
+                                {dt.datePart} · {dt.timePart}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span
+                              className={`text-xs font-mono og-bold ${
+                                isOnTime
+                                  ? 'text-[#c8ff2e]'
+                                  : isMissed
+                                  ? 'text-rose-400'
+                                  : 'text-zinc-400'
+                              }`}
+                            >
+                              {isOnTime
+                                ? `+${rec.pointsAwarded} pts`
+                                : isMissed
+                                ? 'Missed'
+                                : 'Skipped'}
+                            </span>
+                            <span className="block text-[10px] text-zinc-400 font-mono">
+                              {rec.outcome.replace(/_/g, ' ')}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="grid grid-cols-2 gap-2.5 pt-1">
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.96 }}
+                  onClick={() => {
+                    setIsStreakSheetOpen(false);
+                    setActiveTab('admin');
+                  }}
+                  className="py-3 px-4 rounded-full bg-white/[0.08] hover:bg-white/[0.14] text-xs og-bold text-white"
+                >
+                  Full Standings
+                </motion.button>
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.96 }}
+                  onClick={() => {
+                    setIsStreakSheetOpen(false);
+                    setIsScannerOpen(true);
+                  }}
+                  className="lime-cta py-3 px-4 rounded-full text-xs og-bold flex items-center justify-center gap-1.5"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Upload Photo</span>
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 5-SLOT MINIMALIST MOBILE BOTTOM NAVIGATION DOCK (Matches Reference Image) */}
       <nav
         aria-label="Mobile Navigation"
-        className="md:hidden fixed bottom-0 inset-x-0 z-30 h-16 glass-panel border-t border-white/10 px-2 flex items-center justify-around"
+        className="md:hidden fixed bottom-0 inset-x-0 z-30 h-20 bg-[#0d1c0f]/95 backdrop-blur-2xl border-t border-white/[0.08] px-6 flex items-center justify-between"
       >
-        <button
+        {/* Slot 1: Home (Duty HUD) */}
+        <motion.button
           type="button"
+          whileTap={{ scale: 0.88 }}
           onClick={() => setActiveTab('hud')}
-          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl text-xs og-medium ${
-            activeTab === 'hud' ? 'text-[#d0ff45]' : 'text-zinc-400'
-          }`}
+          aria-label="Home Duty HUD"
+          className="relative h-full w-14 flex flex-col items-center justify-center"
         >
-          <Camera className="w-4 h-4" />
-          <span>Duty HUD</span>
-        </button>
-        <button
+          {activeTab === 'hud' && (
+            <motion.div
+              layoutId="mobile-dock-top-bar"
+              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+              className="absolute top-0 w-10 h-[3px] rounded-full bg-[#c8ff2e]"
+            />
+          )}
+          <Home
+            className={`w-6 h-6 transition-colors ${
+              activeTab === 'hud' ? 'text-[#c8ff2e]' : 'text-zinc-500'
+            }`}
+          />
+          {activeTab === 'hud' && (
+            <span className="w-1.5 h-1.5 rounded-full bg-[#c8ff2e] mt-1.5" />
+          )}
+        </motion.button>
+
+        {/* Slot 2: Queue & Household Party (4-Square Grid Icon) */}
+        <motion.button
           type="button"
-          onClick={() => setActiveTab('admin')}
-          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl text-xs og-medium ${
-            activeTab === 'admin' ? 'text-[#d0ff45]' : 'text-zinc-400'
-          }`}
-        >
-          <ShieldCheck className="w-4 h-4" />
-          <span>Admin DB</span>
-        </button>
-        <button
-          type="button"
+          whileTap={{ scale: 0.88 }}
           onClick={() => setActiveTab('party')}
-          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl text-xs og-medium ${
-            activeTab === 'party' ? 'text-[#d0ff45]' : 'text-zinc-400'
-          }`}
+          aria-label="Household Queue and Invite Code"
+          className="relative h-full w-14 flex flex-col items-center justify-center"
         >
-          <Users className="w-4 h-4" />
-          <span>Party</span>
-        </button>
-        <button
+          {activeTab === 'party' && (
+            <motion.div
+              layoutId="mobile-dock-top-bar"
+              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+              className="absolute top-0 w-10 h-[3px] rounded-full bg-[#c8ff2e]"
+            />
+          )}
+          <LayoutGrid
+            className={`w-6 h-6 transition-colors ${
+              activeTab === 'party' ? 'text-[#c8ff2e]' : 'text-zinc-500'
+            }`}
+          />
+          {activeTab === 'party' && (
+            <span className="w-1.5 h-1.5 rounded-full bg-[#c8ff2e] mt-1.5" />
+          )}
+        </motion.button>
+
+        {/* Slot 3: Raised Center Circular Lime Camera CTA */}
+        <div className="relative -top-5 flex items-center justify-center">
+          <motion.button
+            type="button"
+            whileTap={{ scale: 0.9 }}
+            onClick={() => setIsScannerOpen(true)}
+            aria-label="Open Duty Photo Upload Camera"
+            className="w-15 h-15 rounded-full bg-[#c8ff2e] text-[#051807] border-[5px] border-[#061408] shadow-[0_8px_28px_rgba(200,255,46,0.45)] flex items-center justify-center"
+          >
+            <Camera className="w-6 h-6 stroke-[2.3]" />
+          </motion.button>
+        </div>
+
+        {/* Slot 4: Standings & Photo History (Trophy Icon) */}
+        <motion.button
           type="button"
-          onClick={() => setActiveTab('profile')}
-          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-xl text-xs og-medium ${
-            activeTab === 'profile' ? 'text-[#d0ff45]' : 'text-zinc-400'
-          }`}
+          whileTap={{ scale: 0.88 }}
+          onClick={() => setActiveTab('admin')}
+          aria-label="Standings and Photo Verification"
+          className="relative h-full w-14 flex flex-col items-center justify-center"
         >
-          <UserIcon className="w-4 h-4" />
-          <span>Profile</span>
-        </button>
+          {activeTab === 'admin' && (
+            <motion.div
+              layoutId="mobile-dock-top-bar"
+              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+              className="absolute top-0 w-10 h-[3px] rounded-full bg-[#c8ff2e]"
+            />
+          )}
+          <Trophy
+            className={`w-6 h-6 transition-colors ${
+              activeTab === 'admin' ? 'text-[#c8ff2e]' : 'text-zinc-500'
+            }`}
+          />
+          {pendingApprovalDrops.length > 0 && (
+            <span className="absolute top-3.5 right-2.5 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[#0d1c0f]" />
+          )}
+          {activeTab === 'admin' && (
+            <span className="w-1.5 h-1.5 rounded-full bg-[#c8ff2e] mt-1.5" />
+          )}
+        </motion.button>
+
+        {/* Slot 5: Profile & Settings (User Icon) */}
+        <motion.button
+          type="button"
+          whileTap={{ scale: 0.88 }}
+          onClick={() => setActiveTab('profile')}
+          aria-label="Profile and Settings"
+          className="relative h-full w-14 flex flex-col items-center justify-center"
+        >
+          {activeTab === 'profile' && (
+            <motion.div
+              layoutId="mobile-dock-top-bar"
+              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+              className="absolute top-0 w-10 h-[3px] rounded-full bg-[#c8ff2e]"
+            />
+          )}
+          <UserIcon
+            className={`w-6 h-6 transition-colors ${
+              activeTab === 'profile' ? 'text-[#c8ff2e]' : 'text-zinc-500'
+            }`}
+          />
+          {activeTab === 'profile' && (
+            <span className="w-1.5 h-1.5 rounded-full bg-[#c8ff2e] mt-1.5" />
+          )}
+        </motion.button>
       </nav>
 
-      {/* Trash Disposal Photo Upload Modal (For Host Verification) */}
+      {/* Full-Screen Duty Photo Upload Camera Viewfinder Modal */}
       <VisionScannerModal
         isOpen={isScannerOpen}
         onClose={() => setIsScannerOpen(false)}
         activeAssignee={activeAssignee}
         isOverdue={countdown.isOverdue}
         isHostOrAdmin={isHostOrAdmin}
+        rotationIntervalHours={party.rotationIntervalHours}
         onSubmitTrashPhoto={handleUploadTrashPhoto}
       />
     </div>

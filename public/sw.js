@@ -1,25 +1,100 @@
 /* eslint-disable no-restricted-globals */
 // BinDrop Background Service Worker (sw.js)
-// Handles system-level Web Push notifications on Android (FCM) & iOS 16.4+ (APNs)
-// even when the PWA is completely closed and the phone is locked.
+// Provides offline-capable fetch handling (required by Chromium, Brave, Vivo, and Samsung browsers
+// for native standalone PWA / WebAPK installation) and system-level Web Push notifications.
 
-const SW_VERSION = 'bindrop-sw-v3';
+const SW_VERSION = 'bindrop-sw-v5';
+const CACHE_NAME = 'bindrop-pwa-cache-v5';
+const APP_SHELL_ASSETS = [
+  '/',
+  '/index.html',
+  '/manifest.json',
+  '/pwa-192x192.png',
+  '/pwa-512x512.png',
+  '/pwa-maskable-512x512.png',
+  '/apple-touch-icon.png',
+  '/badge-72x72.png',
+];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(self.skipWaiting());
+  self.skipWaiting();
+  event.waitUntil(
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.addAll(APP_SHELL_ASSETS))
+      .catch(() => {})
+  );
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(
+          keys.map((key) => {
+            if (key !== CACHE_NAME) {
+              return caches.delete(key);
+            }
+            return Promise.resolve();
+          })
+        )
+      )
+      .then(() => self.clients.claim())
+  );
+});
+
+// Required fetch handler so all Android browsers (Brave, Vivo, Chrome, Samsung Internet, Edge)
+// pass the PWA installability check and offer "Install App" instead of a browser shortcut.
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  const url = new URL(req.url);
+  // Always bypass cache for API, cloud sync, or cross-origin requests
+  if (
+    url.origin !== self.location.origin ||
+    url.pathname.startsWith('/api/')
+  ) {
+    return;
+  }
+
+  // Network-first with cache fallback for HTML navigations and static assets
+  event.respondWith(
+    fetch(req)
+      .then((networkRes) => {
+        if (networkRes && networkRes.ok && networkRes.type === 'basic') {
+          const clone = networkRes.clone();
+          caches
+            .open(CACHE_NAME)
+            .then((cache) => cache.put(req, clone))
+            .catch(() => {});
+        }
+        return networkRes;
+      })
+      .catch(() =>
+        caches.match(req).then((cachedRes) => {
+          if (cachedRes) return cachedRes;
+          if (req.mode === 'navigate') {
+            return caches.match('/index.html');
+          }
+          return Response.error();
+        })
+      )
+  );
 });
 
 // Listen for encrypted background Web Push payloads from the OS push daemon
 self.addEventListener('push', (event) => {
+  const origin = self.location.origin;
+  const defaultIconUrl = new URL('/pwa-192x192.png', origin).href;
+  const defaultBadgeUrl = new URL('/badge-72x72.png', origin).href;
+
   let payload = {
     title: 'BinDrop Household Alert',
     body: 'You have a new household trash duty update!',
-    icon: '/pwa-192x192.png',
-    badge: '/badge-72x72.png',
+    icon: defaultIconUrl,
+    badge: defaultBadgeUrl,
     tag: 'bindrop-alert-' + Date.now(),
     url: '/',
     category: 'TURN_REMINDER',
@@ -34,8 +109,8 @@ self.addEventListener('push', (event) => {
         ...parsed,
         title: parsed.title || payload.title,
         body: parsed.body || parsed.message || payload.body,
-        icon: parsed.icon || '/pwa-192x192.png',
-        badge: parsed.badge || '/badge-72x72.png',
+        icon: new URL(parsed.icon || '/pwa-192x192.png', origin).href,
+        badge: new URL(parsed.badge || '/badge-72x72.png', origin).href,
         tag: parsed.tag || 'bindrop-alert-' + Date.now(),
         url: parsed.url || '/',
       };

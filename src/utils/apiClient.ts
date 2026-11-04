@@ -1820,7 +1820,7 @@ async function executeClientFallbackRoute(
       });
 
       saveClientStore(store);
-      pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
+      await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
       return {
         ok: true,
         status: 200,
@@ -1869,7 +1869,7 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
-    pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
+    await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
 
     return {
       ok: true,
@@ -2003,7 +2003,7 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
-    pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
+    await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
     return {
       ok: true,
       status: 200,
@@ -2120,7 +2120,7 @@ async function executeClientFallbackRoute(
 
     for (const key of Object.keys(store.accounts)) {
       const acc = store.accounts[key];
-      if (acc.uid === body.uid) {
+      if (acc.uid === body.uid || (cleanEmail && acc.email.toLowerCase() === cleanEmail)) {
         acc.displayName = cleanName;
         if (body.photoURL !== undefined) acc.photoURL = body.photoURL;
         if (cleanEmail && cleanEmail !== key) {
@@ -2136,7 +2136,9 @@ async function executeClientFallbackRoute(
     if (body.partyId && store.parties[body.partyId]) {
       const party = store.parties[body.partyId];
       party.members = party.members.map((m) => {
-        if (m.uid !== body.uid) return m;
+        if (m.uid !== body.uid && (!cleanEmail || m.email.toLowerCase() !== cleanEmail)) {
+          return m;
+        }
         return {
           ...m,
           displayName: cleanName,
@@ -2144,11 +2146,37 @@ async function executeClientFallbackRoute(
           photoURL: body.photoURL !== undefined ? body.photoURL : m.photoURL,
         };
       });
+      if (store.dropsByParty[party.id]) {
+        store.dropsByParty[party.id] = store.dropsByParty[party.id].map((d) =>
+          d.userId === body.uid || (cleanEmail && d.userEmail.toLowerCase() === cleanEmail)
+            ? {
+                ...d,
+                userDisplayName: cleanName,
+                userEmail: cleanEmail || d.userEmail,
+                userPhotoURL: body.photoURL !== undefined ? body.photoURL : d.userPhotoURL,
+              }
+            : d
+        );
+      }
+      if (store.historyByParty[party.id]) {
+        store.historyByParty[party.id] = store.historyByParty[party.id].map((h) =>
+          h.userId === body.uid || (cleanEmail && h.userEmail.toLowerCase() === cleanEmail)
+            ? {
+                ...h,
+                userDisplayName: cleanName,
+                userEmail: cleanEmail || h.userEmail,
+                userPhotoURL: body.photoURL !== undefined ? body.photoURL : h.userPhotoURL,
+              }
+            : h
+        );
+      }
       party.updatedAt = nowIso;
-      pushPartyStoreToCloud(store, party.id, { forceWrite: true }).catch(() => {});
+      saveClientStore(store);
+      await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
+    } else {
+      saveClientStore(store);
     }
 
-    saveClientStore(store);
     return {
       ok: true,
       status: 200,

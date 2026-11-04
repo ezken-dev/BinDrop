@@ -1,6 +1,5 @@
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { db } from '../firebase';
 import { apiFetch } from './apiClient';
+import { readCloudDoc, writeCloudDoc } from './cloudPartySync';
 
 // Default fallback public VAPID key (overridden dynamically by /api/push/vapid-public-key when backend is reachable)
 export const FALLBACK_VAPID_PUBLIC_KEY =
@@ -91,6 +90,14 @@ export function getMobilePushEnvironment(): MobilePushEnvironment {
   };
 }
 
+export function isIosDevice(): boolean {
+  return getMobilePushEnvironment().isIOS;
+}
+
+export function isStandalonePwa(): boolean {
+  return getMobilePushEnvironment().isStandalone;
+}
+
 /**
  * Registers `/sw.js` at root scope (`/`) so background push events can wake the service worker
  * even when BinDrop is closed or the phone screen is locked.
@@ -154,10 +161,14 @@ export async function triggerSystemNotificationViaServiceWorker(params: {
     return false;
   }
 
+  const origin = window.location.origin;
+  const resolvedIconUrl = new URL('/pwa-192x192.png', origin).href;
+  const resolvedBadgeUrl = new URL('/badge-72x72.png', origin).href;
+
   const options: NotificationOptions & { renotify?: boolean; vibrate?: number[] } = {
     body: params.body,
-    icon: '/pwa-192x192.png',
-    badge: '/badge-72x72.png',
+    icon: resolvedIconUrl,
+    badge: resolvedBadgeUrl,
     tag: params.tag || `bindrop-${Date.now()}`,
     renotify: true,
     vibrate: [200, 100, 220],
@@ -187,8 +198,8 @@ export async function triggerSystemNotificationViaServiceWorker(params: {
   try {
     new Notification(params.title, {
       body: params.body,
-      icon: '/pwa-192x192.png',
-      badge: '/badge-72x72.png',
+      icon: resolvedIconUrl,
+      badge: resolvedBadgeUrl,
       tag: params.tag || `bindrop-${Date.now()}`,
     });
     return true;
@@ -306,18 +317,16 @@ export async function subscribeUserToBackgroundPush(params: {
     // ignore backend error if static host
   }
 
-  // Also persist in Cloud Firestore `bindrop_cloud/push_subs` in the background (non-blocking)
+  // Also persist in Dual-Engine Cloud Sync `push_subs` in the background (non-blocking)
   if (cleanEmail && subscriptionJson?.endpoint) {
     (async () => {
       try {
-        const subRef = doc(db, 'bindrop_cloud', 'push_subs');
-        const snap = await getDoc(subRef);
-        let existingList: any[] = [];
-        if (snap.exists() && typeof snap.data()?.payloadJson === 'string') {
-          existingList = JSON.parse(snap.data().payloadJson) || [];
-        }
-        const filtered = existingList.filter(
-          (item) => item.endpoint !== subscriptionJson?.endpoint && item.userEmail !== cleanEmail
+        const existingList = (await readCloudDoc<any[]>('push_subs')) || [];
+        const filtered = (Array.isArray(existingList) ? existingList : []).filter(
+          (item) =>
+            item &&
+            item.endpoint !== subscriptionJson?.endpoint &&
+            item.userEmail !== cleanEmail
         );
         filtered.unshift({
           userEmail: cleanEmail,
@@ -328,12 +337,7 @@ export async function subscribeUserToBackgroundPush(params: {
           subscription: subscriptionJson,
           updatedAtIso: nowIso,
         });
-        await setDoc(subRef, {
-          docId: 'push_subs',
-          kind: 'PUSH_SUBS',
-          payloadJson: JSON.stringify(filtered.slice(0, 60)),
-          updatedAtIso: nowIso,
-        });
+        await writeCloudDoc('push_subs', 'PUSH_SUBS', filtered.slice(0, 30));
       } catch {
         // ignore cloud error
       }
