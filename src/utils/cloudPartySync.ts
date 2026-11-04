@@ -192,7 +192,6 @@ export function compactPartyForCloud(
   return {
     ...party,
     inviteCode: formatSixCharInviteCode(party.inviteCode),
-    lastDropImageUrl: undefined,
     members: (party.members || []).map((m) => {
       const bestPhoto = chooseBestAvatar(m.photoURL, undefined, m.email);
       return {
@@ -1390,11 +1389,14 @@ export async function pushPartyStoreToCloud(
 
     const invMap = new Map<string, HouseholdInvitation>();
     for (const inv of [...(existingGlobal?.invitations || []), ...(store.invitations || [])]) {
-      if (!inv || !inv.id || mergedDeleted.includes(inv.partyId)) continue;
-      const prev = invMap.get(inv.id);
+      if (!inv || !inv.id || !inv.invitedEmail || mergedDeleted.includes(inv.partyId)) continue;
+      const dedupeKey = `${inv.partyId}:${inv.invitedEmail.trim().toLowerCase()}`;
+      const prev = invMap.get(dedupeKey);
+      const prevTs = prev ? new Date(prev.respondedAt || prev.createdAt || 0).getTime() : 0;
+      const currTs = new Date(inv.respondedAt || inv.createdAt || 0).getTime();
       const hostParty = store.parties[inv.partyId] || mergedParties[inv.partyId];
-      if (!prev || inv.status !== 'PENDING') {
-        invMap.set(inv.id, {
+      if (!prev || currTs >= prevTs) {
+        invMap.set(dedupeKey, {
           ...inv,
           hostPhotoURL: undefined,
           inviteCode: formatSixCharInviteCode(hostParty?.inviteCode || inv.inviteCode),
@@ -1555,21 +1557,36 @@ export async function syncStoreWithCloud(
         if (Array.isArray(globalDoc.leftPartyKeys)) {
           for (const lk of globalDoc.leftPartyKeys) {
             if (!store.leftPartyKeys.includes(lk)) {
-              // Do not import a stale cloud leftPartyKey if the user rejoined their active party
-              const isRejoinedActiveMember = Boolean(
+              // Do not import a stale cloud leftPartyKey if ANY member in any local party has rejoined
+              let isRejoinedMemberInAnyLocalParty = false;
+              for (const [pid, localP] of Object.entries(store.parties)) {
+                if (!localP || isFakeStubParty(localP) || store.deletedPartyIds.includes(pid)) {
+                  continue;
+                }
+                for (const m of localP.members || []) {
+                  const mEmail = (m.email || '').trim().toLowerCase();
+                  if (!mEmail) continue;
+                  if (
+                    (lk === `${pid}:${mEmail}` || lk === `${mEmail}:${pid}`) &&
+                    !isUserLeftKeyMatched(store.leftPartyKeys, pid, mEmail)
+                  ) {
+                    isRejoinedMemberInAnyLocalParty = true;
+                    break;
+                  }
+                }
+                if (isRejoinedMemberInAnyLocalParty) break;
+              }
+
+              const isRejoinedCaller = Boolean(
                 cleanEmail &&
                   ((activePid &&
-                    (lk === `${activePid}:${cleanEmail}` || lk === `${cleanEmail}:${activePid}`) &&
-                    (userMembershipDoc?.partyId === activePid ||
-                      (store.parties[activePid]?.members?.some(
-                        (m) => m.email?.toLowerCase() === cleanEmail
-                      ) &&
-                        !isUserLeftKeyMatched(store.leftPartyKeys, activePid, cleanEmail)))) ||
+                    (lk === `${activePid}:${cleanEmail}` || lk === `${cleanEmail}:${activePid}`)) ||
                     (userMembershipDoc?.partyId &&
                       (lk === `${userMembershipDoc.partyId}:${cleanEmail}` ||
                         lk === `${cleanEmail}:${userMembershipDoc.partyId}`)))
               );
-              if (!isRejoinedActiveMember) {
+
+              if (!isRejoinedMemberInAnyLocalParty && !isRejoinedCaller) {
                 store.leftPartyKeys.push(lk);
               }
             }
@@ -1611,7 +1628,9 @@ export async function syncStoreWithCloud(
       if (combinedInvites.length > 0) {
         const invMap = new Map<string, HouseholdInvitation>();
         for (const inv of combinedInvites) {
-          if (!inv || !inv.id || store.deletedPartyIds.includes(inv.partyId)) continue;
+          if (!inv || !inv.id || !inv.invitedEmail || store.deletedPartyIds.includes(inv.partyId)) {
+            continue;
+          }
           if (inv.partySnapshot && !isFakeStubParty(inv.partySnapshot)) {
             const snapPid = inv.partySnapshot.id;
             if (!store.parties[snapPid] && !store.deletedPartyIds.includes(snapPid)) {
@@ -1621,9 +1640,12 @@ export async function syncStoreWithCloud(
               };
             }
           }
-          const prev = invMap.get(inv.id);
-          if (!prev || inv.status !== 'PENDING') {
-            invMap.set(inv.id, {
+          const dedupeKey = `${inv.partyId}:${inv.invitedEmail.trim().toLowerCase()}`;
+          const prev = invMap.get(dedupeKey);
+          const prevTs = prev ? new Date(prev.respondedAt || prev.createdAt || 0).getTime() : 0;
+          const currTs = new Date(inv.respondedAt || inv.createdAt || 0).getTime();
+          if (!prev || currTs >= prevTs) {
+            invMap.set(dedupeKey, {
               ...inv,
               inviteCode: formatSixCharInviteCode(inv.inviteCode),
             });

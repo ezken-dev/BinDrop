@@ -1,92 +1,75 @@
-# BinDrop — Pure Service Worker Background Web Push & Party Rejoin Fix
+# BinDrop — Photo Uploader Attribution & Party Rejoin (6-Digit Code + Email Invite) Fix
 
-This update strictly enforces OS-level background Web Push execution across the Service Worker, client subscription manager, backend dispatcher, and frontend polling loop so lock-screen alerts are delivered exclusively by the Service Worker even when BinDrop is completely closed. It also resolves the party rejoin bug where a member who previously left a household is forcefully kicked back out a few seconds after rejoining with the 6-digit invite code.
+This update fixes two critical household bugs:
+1. **Accurate Photo Uploader Attribution**: Ensures that whenever any roommate uploads a trash photo (even if it is currently another roommate's scheduled turn), the camera modal, uploaded drop log, Host verification card, and notifications display the **actual user who uploaded the photo** rather than the scheduled turn assignee's name.
+2. **Reliable Party Rejoin via 6-Digit Code & Email Invitation**: Fixes the multi-device leave tombstone (`leftPartyKeys`) and invitation deduplication bugs that prevented former party members from rejoining via the 6-digit invite code or accepting a new email invitation after leaving once.
 
 ### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> All five architectural constraints specified in your request are incorporated into this plan and ready to execute upon approval:
+> Both bug fixes are ready to execute immediately upon your approval:
 
-- **1. Service Worker (`push` & `notificationclick`)**: Wraps `self.registration.showNotification(...)` strictly inside `event.waitUntil(...)`, safely parses `event.data.json()` inside a `try/catch` block with a plain-text fallback, enforces `requireInteraction: true`, `vibrate`, `icon`, and `badge`, and wraps deep-link navigation inside `event.waitUntil(clients.openWindow(...))`.
-- **2. Client Subscription Logic**: Enforces `userVisibleOnly: true` and `urlBase64ToUint8Array(vapidPublicKey)` in `registration.pushManager.subscribe(...)` and removes browser-thread `new Notification(...)` calls.
-- **3. Backend Web Push Dispatch**: Sends a stringified JSON payload (`title`, `body`, `url`, `icon`, `badge`, `tag`, `category`) via `webPush.sendNotification(...)` with `{ urgency: 'high', TTL: 86400 }` to wake Android from Doze mode and iOS APNs immediately.
-- **4. Frontend Polling Cleanup**: Strips `new Notification(...)` / `triggerBrowserPushNotification` out of the client `/api/session` polling loop so OS notifications are triggered strictly by the Service Worker `push` event (preventing false positives while keeping in-app UI state synced).
-- **5. Rejoin Household by 6-Digit Code Fix**: Purges stale `leftPartyKeys` from both the local session store and the cloud `global_index` document when a user rejoins via a 6-character code or invite so background cloud merges never forcefully eject a rejoined member.
+- **1. Out-of-Turn Photo Upload Attribution**:
+  - Passes the currently signed-in user's identity (`currentAccount` / `selfMember`) into the camera modal and `POST /api/party/drop` (`userId`, `userEmail`, `userDisplayName`, `userPhotoURL`) instead of hardcoding `activeTurnMember.uid`.
+  - Updates backend and client `/api/party/drop` handlers to resolve the uploader by matching `uid` or `email` against `party.members` (falling back to the caller's profile if needed) so the photo card, notifications, and points always credit the person who actually took the photo.
+- **2. Rejoin Party After Leaving (6-Digit Code & Email Invitation)**:
+  - **Stop Cross-Device Leave Key Re-Infection**: Prevents `/api/session` polls from other open devices (such as the Host's phone/PC) from re-injecting stale `clientLeftPartyKeys` into the server store and kicking a newly rejoined member back out 5 seconds later.
+  - **Fix Email Re-Invitations**: Generates a fresh unique invitation ID whenever a Host re-invites a former member and updates cloud invitation merging to compare timestamps (`createdAt` / `respondedAt`) instead of overwriting `PENDING` re-invitations with older `ACCEPTED` records.
+  - **Fix Client Leave Cleanup**: Prevents `mirrorServerPayloadToClientStore` from mistakenly adding an active party to `deletedPartyIds` when a member or former host leaves without deleting the party.
 
 ---
 
 ### 1. Overview & Core Concept
 
 - **What It Does**:
-  1. Guarantees that every household notification on iOS and Android is a genuine Service Worker Web Push event woken by FCM/APNs (`urgency: 'high'`, `TTL: 86400`), eliminating frontend polling `new Notification(...)` calls that masked push delivery issues while the app was open.
-  2. Fixes the household membership state machine so a user who leaves a household and later rejoins with the 6-digit party code remains permanently in the party across cloud sync cycles.
-- **Target Audience / Persona**: Household roommates using BinDrop on iOS Home Screen Web Apps, Android Chrome PWAs, and desktop browsers.
-- **Key Value**: True background lock-screen delivery when the app is swiped away, plus reliable household leave-and-rejoin flows.
+  1. Credits the actual logged-in roommate who snaps and uploads a trash disposal photo, whether they are uploading on their own turn or helping out during another roommate's turn.
+  2. Allows any roommate who has left a household party to rejoin seamlessly using either the **6-digit invite code** or an **email invitation** from the Host, staying permanently in the household across all 5-second sync cycles.
+- **Target Audience / Persona**: Roommates sharing trash duty across multiple mobile and desktop devices.
+- **Key Value**: Eliminates misattributed photo uploads and ensures leaving and rejoining a party works reliably every time.
 
 ---
 
 ### 2. User Experience & Visual Design
 
 - **Key User Flows**:
-  - **Closed-App Lock-Screen Push Flow**:
-    1. When a roommate logs in or enables alerts, the client registers the Service Worker and subscribes via `pushManager.subscribe({ userVisibleOnly: true, applicationServerKey })`.
-    2. When any household event occurs (photo verification, turn pass, deadline alert, or invite), the backend dispatches an encrypted Web Push with `{ urgency: 'high', TTL: 86400 }`.
-    3. Even with BinDrop completely closed, the OS wakes the Service Worker (`event.waitUntil(self.registration.showNotification(...))`), displaying the alert with the BinDrop icon, monochrome badge, vibration pattern, and `requireInteraction: true`.
-    4. Tapping the lock-screen notification triggers `notificationclick` (`event.waitUntil(clients.openWindow(targetUrl))`), opening or focusing BinDrop directly to the target screen.
-  - **Leave & Rejoin by 6-Digit Code Flow**:
-    1. A user leaves a household (`leftPartyKeys` records their departure so stale devices don't re-add them automatically).
-    2. Later, the user enters the household's 6-character invite code and clicks **Join**.
-    3. Both the local state and the cloud `global_index` immediately clear the user's `leftPartyKeys` entry for that household and persist their active membership, so subsequent 5-second `/api/session` polls keep them inside the household without kicking them back out.
-- **Visual Identity & Theme**:
-  - Preserves BinDrop's high-contrast tactical dark UI (`#080B12` surface, `#10B981` emerald accents) and crisp notification iconography (`/pwa-192x192.png` color icon and `/badge-72x72.png` alpha mask).
-- **Interactive Feedback & Motion**:
-  - In-app toasts continue to display smoothly while the app is open, while all OS-level system notifications are exclusively rendered by the Service Worker `push` listener.
+  - **Uploading a Photo Out of Turn**:
+    1. Roommate B opens the camera while the HUD shows it is Roommate A's turn.
+    2. The camera header and submission credit **Roommate B** (`currentAccount.displayName`).
+    3. Once uploaded (and approved by the Host), the verification feed, activity history, and alerts all display **Roommate B's** name and avatar.
+  - **Leaving & Rejoining via 6-Digit Code or Email Invite**:
+    1. A roommate leaves the household party.
+    2. They either enter the household's **6-digit invite code** or accept a new **Email Invitation** sent by the Host.
+    3. They immediately enter the household HUD and remain in the party permanently without being kicked out on subsequent background syncs.
 
 ---
 
 ### 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Strict Separation Between In-App UI Sync and OS Notifications**
-  - *Chosen Approach*: Strip `new Notification(...)` completely from the frontend `/api/session` polling loop and client utilities. Only the Service Worker `push` event listener calls `self.registration.showNotification(...)`.
-  - *Why*: Calling `new Notification(...)` from a `setInterval` poll makes notifications appear to work while the tab is open even if Web Push is failing in the background, and causes duplicate alerts when both fire.
-  - *Alternatives Considered*: Keeping a frontend notification fallback when push permissions are partial — rejected because it creates false positives during testing and fails the moment the app is backgrounded.
-- **Decision 2: Cloud Tombstone (`leftPartyKeys`) Cleanup on Rejoin**
-  - *Chosen Approach*: When a user joins a party via 6-digit code or accepts an invite, explicitly remove `<partyId>:<email>` and `<email>:<partyId>` from `store.leftPartyKeys` before pushing to cloud, and filter out any `existingGlobal.leftPartyKeys` entry in `pushPartyStoreToCloud` and `syncStoreWithCloud` whenever the user is an active member of that party.
-  - *Why*: Previously, `pushPartyStoreToCloud` unioned local `leftPartyKeys` with `existingGlobal.leftPartyKeys` from Firestore, which re-injected the old leave tombstone right back into the store and caused the next `/api/session` poll (5 seconds later) to forcefully eject the user.
+- **Decision 1: Server-Authoritative Leave State (No Client Poll Re-Injection)**
+  - *Chosen Approach*: Remove `clientLeftPartyKeys` ingestion from `/api/session` polling on the server and filter `global_index.leftPartyKeys` against all active members across all parties (not just the current request caller).
+  - *Why*: Previously, when User B rejoined on Device 2, the Host's browser on Device 1 still had `partyId:userB` in its `localStorage` and sent it back to the server on its next 5-second `/api/session` poll—causing the server to re-mark User B as "left" and kick them out.
+- **Decision 2: Fresh Invitation IDs & Timestamp-Based Invitation Merging**
+  - *Chosen Approach*: Always issue a new `inv_<timestamp>` ID when re-inviting a member by email and merge invitations in cloud sync by newest timestamp.
+  - *Why*: Reusing the previous invitation ID caused the cloud sync merger (`if (!prev || inv.status !== 'PENDING')`) to overwrite the new `PENDING` invitation with the old `ACCEPTED` status from before the user left.
 
 ---
 
 ### 4. Technical Architecture & Data Strategy *(Technical Reference)*
 
-- **Architecture & Component Diagram**:
+- **Architecture & Data Flow Diagram**:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                       Backend Web Push Dispatcher                       │
-│  • webPush.sendNotification(sub, JSON.stringify({ title, body, url }),  │
-│    { urgency: 'high', TTL: 86400 })                                     │
-└───────────────────────────────────┬─────────────────────────────────────┘
-                                    │ Encrypted RFC 8030 Push (FCM / APNs)
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     OS Background Service Worker                        │
-│  • push listener: try/catch event.data.json() -> text() fallback        │
-│  • event.waitUntil(self.registration.showNotification(title, {          │
-│      body, icon, badge, vibrate, requireInteraction: true, data         │
-│    }))                                                                  │
-│  • notificationclick listener: event.waitUntil(clients.openWindow(url)) │
+│                    1. Photo Upload Attribution Flow                     │
+│  • Logged-In User (selfMember / currentAccount) opens Camera            │
+│  • POST /api/party/drop sends { userId, userEmail, userDisplayName }    │
+│  • Server & Client resolve uploader by UID/Email -> Credits Uploader    │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                   Household Rejoin & Cloud Sync Engine                  │
-│  • Join by 6-Digit Code -> Clears leftPartyKeys locally & in Cloud      │
-│  • Cloud Merge Filter -> Active party members strip stale leave keys    │
-│  • Session Poll (/api/session) -> Updates React UI only (no OS Notify)  │
+│             2. Party Rejoin Flow (6-Digit Code & Email Invite)          │
+│  • Join by Code (/api/party/join) OR Accept Invite (/respond-invite)    │
+│  • Purges <partyId>:<email> leave keys across Server, Client & Cloud    │
+│  • Host /api/session polls blocked from re-injecting stale leave keys   │
+│  • Email Re-Invite (/add-member) creates fresh PENDING invitation ID    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
-
-- **Data Model & State**:
-  - **Push Payload Schema**: `{ title: string, body: string, url: string, icon: string, badge: string, tag: string, category: string, senderName?: string }`.
-  - **Cloud Leave Tombstones (`leftPartyKeys`)**: Array of `<partyId>:<email>` strings tracking intentional departures. Cleared across local memory, client storage, and Firestore `global_index` whenever a user rejoins that `partyId`.
-- **Interactive Component & State Mapping**:
-  - **Push Subscription Manager**: Converts the VAPID public key via `urlBase64ToUint8Array`, subscribes with `userVisibleOnly: true`, and POSTs the endpoint + keys to `/api/push/subscribe`.
-  - **Household Rejoin Handler**: Increments the client mutation epoch, removes leave tombstones prior to `pullPartyByInviteCodeFromCloud` and `pushPartyStoreToCloud`, writes `user_<email>` membership to cloud, and returns the updated household bundle.

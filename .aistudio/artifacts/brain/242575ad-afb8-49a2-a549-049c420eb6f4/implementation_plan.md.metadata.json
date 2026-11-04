@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for enforcing pure Service Worker OS-level Web Push notifications (eliminating frontend polling Notification fallbacks) and fixing the party rejoin bug where leaving and rejoining with a 6-digit invite code forcefully kicks the user back out.",
-  "updatedAt": "2026-11-04T07:13:22.697837577Z",
+  "summary": "Implementation plan to fix (1) photo uploads always showing the actual uploader's name/profile even when uploading out of turn, and (2) rejoining a household party after leaving via both the 6-digit invite code and email invitations without being kicked back out.",
+  "updatedAt": "2026-11-04T07:40:41.664366413Z",
   "requestFeedback": true,
   "userFacing": true
 }

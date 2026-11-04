@@ -778,6 +778,8 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         invitationId: invitation.id,
+        partyId: invitation.partyId,
+        inviteCode: invitation.inviteCode,
         decision: 'ACCEPT',
         userUid: currentAccount.uid,
         userEmail: currentAccount.email,
@@ -801,6 +803,8 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         invitationId: invitation.id,
+        partyId: invitation.partyId,
+        inviteCode: invitation.inviteCode,
         decision: 'DECLINE',
         userEmail: currentAccount.email,
       }),
@@ -850,12 +854,28 @@ export default function App() {
       party.members[party.currentTurnIndex] ||
       party.members[0];
 
+    // Attribute the photo upload to the currently logged-in user who is actually posting the photo
+    const uploaderMember =
+      (currentAccount &&
+        party.members.find(
+          (m) =>
+            m.uid === currentAccount.uid ||
+            m.email.toLowerCase() === currentAccount.email.toLowerCase()
+        )) ||
+      activeTurnMember;
+
+    const uploaderName =
+      currentAccount?.displayName || uploaderMember?.displayName || 'Roommate';
+
     const { ok, data } = await apiFetch('/api/party/drop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         partyId: party.id,
-        userId: activeTurnMember.uid,
+        userId: uploaderMember.uid,
+        userEmail: currentAccount?.email || uploaderMember.email,
+        userDisplayName: uploaderName,
+        userPhotoURL: currentAccount?.photoURL || uploaderMember.photoURL,
         imageUrl: payload.imageUrl,
         locationNote: payload.locationNote,
         verifyImmediatelyAsHost: payload.verifyImmediatelyAsHost,
@@ -872,11 +892,11 @@ export default function App() {
           updatedParty.members.find((m) => m.uid === updatedParty.currentTurnUserId) ||
           updatedParty.members[0];
         setCelebrationBanner(
-          `Photo uploaded & verified by Host (+${data.drop?.pointsAwarded || 100} pts)! Turn rotated to ${nextMember.displayName}.`
+          `Photo uploaded by ${uploaderName} & verified by Host (+${data.drop?.pointsAwarded || 100} pts)! Turn rotated to ${nextMember.displayName}.`
         );
       } else {
         setCelebrationBanner(
-          `Trash photo uploaded by ${activeTurnMember.displayName}! Host (${party.hostEmail}) received an instant pop-up alert to verify.`
+          `Trash photo uploaded by ${uploaderName}! Host (${party.hostEmail}) received an instant pop-up alert to verify.`
         );
       }
       setTimeout(() => setCelebrationBanner(null), 5500);
@@ -2658,7 +2678,15 @@ export default function App() {
       <VisionScannerModal
         isOpen={isScannerOpen}
         onClose={() => setIsScannerOpen(false)}
-        activeAssignee={activeAssignee}
+        activeAssignee={
+          (currentAccount &&
+            party.members.find(
+              (m) =>
+                m.uid === currentAccount.uid ||
+                m.email.toLowerCase() === currentAccount.email.toLowerCase()
+            )) ||
+          activeAssignee
+        }
         isOverdue={countdown.isOverdue}
         isHostOrAdmin={isHostOrAdmin}
         rotationIntervalHours={party.rotationIntervalHours}

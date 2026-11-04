@@ -546,13 +546,15 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
       }
     }
     if (user.partyId) {
+      store.deletedPartyIds = store.deletedPartyIds.filter((id) => id !== user.partyId);
       store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
       store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, user.partyId, cleanEmail);
     } else if (allDeletedIds.length > 0 || data.leftPartyId || data.dissolved) {
       if (!store.clearedPartyUsers.includes(cleanEmail)) {
         store.clearedPartyUsers.push(cleanEmail);
       }
-      // Also purge any older local parties for this user so they can never resurrect
+      // Mark the party as left by this user and remove them from the local roster copy,
+      // but only mark a party as deleted if it was actually in allDeletedIds!
       for (const p of Object.values(store.parties)) {
         if (!p) continue;
         const isUserInParty =
@@ -561,7 +563,11 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
           p.members.some((m) => m.uid === user.uid || m.email.toLowerCase() === cleanEmail);
         if (isUserInParty) {
           addUserLeftKey(store.leftPartyKeys, p.id, cleanEmail);
-          if (p.hostId === user.uid || p.hostEmail.toLowerCase() === cleanEmail) {
+          p.members = p.members.filter(
+            (m) => m.uid !== user.uid && m.email.toLowerCase() !== cleanEmail
+          );
+          p.memberIds = p.members.map((m) => m.uid);
+          if (allDeletedIds.includes(p.id)) {
             if (!store.deletedPartyIds.includes(p.id)) {
               store.deletedPartyIds.push(p.id);
             }
@@ -600,8 +606,9 @@ function mirrorServerPayloadToClientStore(data: Record<string, unknown>) {
     partyInvitations?: HouseholdInvitation[];
   } | null;
 
-  if (bundle && bundle.party && !store.deletedPartyIds.includes(bundle.party.id)) {
+  if (bundle && bundle.party && !allDeletedIds.includes(bundle.party.id)) {
     const pid = bundle.party.id;
+    store.deletedPartyIds = store.deletedPartyIds.filter((id) => id !== pid);
     bundle.party.inviteCode = formatSixCharInviteCode(bundle.party.inviteCode);
     store.parties[pid] = bundle.party;
     if (bundle.drops) store.dropsByParty[pid] = bundle.drops;
@@ -1266,6 +1273,13 @@ async function executeClientFallbackRoute(
         data: { error: 'Please enter a valid email address.' },
       };
     }
+    const wasPreviouslyLeft = isUserLeftKeyMatched(store.leftPartyKeys, party.id, cleanEmail);
+    store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, party.id, cleanEmail);
+    if (wasPreviouslyLeft) {
+      party.members = party.members.filter((m) => m.email.toLowerCase() !== cleanEmail);
+      party.memberIds = party.members.map((m) => m.uid);
+    }
+
     if (party.members.some((m) => m.email.toLowerCase() === cleanEmail)) {
       return {
         ok: false,
@@ -1282,36 +1296,27 @@ async function executeClientFallbackRoute(
       store.invitations = [];
     }
 
-    let invitation = store.invitations.find(
-      (inv) =>
-        inv.partyId === party.id &&
-        inv.invitedEmail.toLowerCase() === cleanEmail &&
-        inv.status === 'PENDING'
+    store.invitations = store.invitations.filter(
+      (inv) => !(inv.partyId === party.id && inv.invitedEmail.toLowerCase() === cleanEmail)
     );
 
-    if (invitation) {
-      invitation.invitedName = cleanName;
-      invitation.partySnapshot = compactPartyForCloud(party);
-      invitation.createdAt = nowIso;
-    } else {
-      invitation = {
-        id: randomId('inv'),
-        partyId: party.id,
-        partyName: party.name,
-        inviteCode: party.inviteCode,
-        rotationIntervalHours: party.rotationIntervalHours,
-        hostId: hostMember?.uid || party.hostId,
-        hostName: hostMember?.displayName || party.hostEmail.split('@')[0],
-        hostEmail: hostMember?.email || party.hostEmail,
-        hostPhotoURL: hostMember?.photoURL,
-        invitedName: cleanName,
-        invitedEmail: cleanEmail,
-        status: 'PENDING',
-        createdAt: nowIso,
-        partySnapshot: compactPartyForCloud(party),
-      };
-      store.invitations.unshift(invitation);
-    }
+    const invitation: HouseholdInvitation = {
+      id: randomId('inv'),
+      partyId: party.id,
+      partyName: party.name,
+      inviteCode: party.inviteCode,
+      rotationIntervalHours: party.rotationIntervalHours,
+      hostId: hostMember?.uid || party.hostId,
+      hostName: hostMember?.displayName || party.hostEmail.split('@')[0],
+      hostEmail: hostMember?.email || party.hostEmail,
+      hostPhotoURL: hostMember?.photoURL,
+      invitedName: cleanName,
+      invitedEmail: cleanEmail,
+      status: 'PENDING',
+      createdAt: nowIso,
+      partySnapshot: compactPartyForCloud(party),
+    };
+    store.invitations.unshift(invitation);
 
     if (!store.alertsByParty[party.id]) store.alertsByParty[party.id] = [];
     store.alertsByParty[party.id].unshift({
@@ -1333,7 +1338,10 @@ async function executeClientFallbackRoute(
     });
 
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
+    await pushPartyStoreToCloud(store, party.id, {
+      forceWrite: true,
+      rejoinedEmail: cleanEmail,
+    });
     return {
       ok: true,
       status: 200,
@@ -1772,10 +1780,25 @@ async function executeClientFallbackRoute(
     if (!party) {
       return { ok: false, status: 404, data: { error: 'Party not found.' } };
     }
-    const completingMember =
-      party.members.find((m) => m.uid === body.userId) ||
+    const cleanUploaderEmail = String(body.userEmail || '').trim().toLowerCase();
+    const matchedUploader =
+      party.members.find(
+        (m) =>
+          (body.userId && m.uid === body.userId) ||
+          (cleanUploaderEmail && m.email.toLowerCase() === cleanUploaderEmail)
+      ) ||
       party.members.find((m) => m.uid === party.currentTurnUserId) ||
       party.members[0];
+
+    const completingMember: HouseholdMember = {
+      ...matchedUploader,
+      displayName: String(body.userDisplayName || matchedUploader.displayName || 'Roommate').trim(),
+      photoURL: chooseBestAvatar(
+        matchedUploader.photoURL,
+        body.userPhotoURL,
+        cleanUploaderEmail || matchedUploader.email
+      ),
+    };
 
     const previousDeadlineIso = party.nextDeadline;
     const completedOnTime = new Date(nowIso).getTime() <= new Date(previousDeadlineIso).getTime();

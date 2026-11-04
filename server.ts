@@ -771,44 +771,22 @@ function hydrateClientCachedBundleIfNeeded(
   if (Array.isArray(clientDeletedPartyIds)) {
     for (const delId of clientDeletedPartyIds) {
       if (typeof delId === 'string' && delId) {
+        // Do not let a stale client deletedPartyId delete an active multi-member party on the server
+        if (store.parties[delId] && (store.parties[delId].members?.length || 0) > 0) {
+          continue;
+        }
         if (!store.deletedPartyIds.includes(delId)) {
           store.deletedPartyIds.push(delId);
-          dirty = true;
-        }
-        if (store.parties[delId]) {
-          delete store.parties[delId];
-          delete store.dropsByParty[delId];
-          delete store.historyByParty[delId];
-          delete store.emailsByParty[delId];
-          delete store.alertsByParty[delId];
           dirty = true;
         }
       }
     }
   }
 
-  if (Array.isArray(clientLeftPartyKeys)) {
-    const activeServerPid = cleanEmail ? store.accounts[cleanEmail]?.partyId : undefined;
-    for (const lk of clientLeftPartyKeys) {
-      if (typeof lk === 'string' && lk && !store.leftPartyKeys.includes(lk)) {
-        // Do not let a stale client leftPartyKey override an active rejoined server party
-        const isRejoinedOnServer = Boolean(
-          cleanEmail &&
-            activeServerPid &&
-            (lk === `${activeServerPid}:${cleanEmail}` ||
-              lk === `${cleanEmail}:${activeServerPid}`) &&
-            store.parties[activeServerPid]?.members?.some(
-              (m) => m.email.toLowerCase() === cleanEmail
-            ) &&
-            !isLeftKeyMatchedServer(activeServerPid, cleanEmail)
-        );
-        if (!isRejoinedOnServer) {
-          store.leftPartyKeys.push(lk);
-          dirty = true;
-        }
-      }
-    }
-  }
+  // Note: Do NOT import clientLeftPartyKeys from client /api/session polls.
+  // The server and cloud are authoritative for leave/rejoin state; importing clientLeftPartyKeys
+  // from another roommate's browser localStorage would re-add old leave keys after a user rejoins.
+  void clientLeftPartyKeys;
 
   const ingestParty = (incomingParty: PartyState) => {
     if (!incomingParty || !incomingParty.id || isFakeStubParty(incomingParty)) return;
@@ -1950,6 +1928,13 @@ async function startServer() {
 
     hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
 
+    // Clear any previous "left" or "cleared" marker for any party matching this invite code BEFORE pulling from cloud
+    for (const p of Object.values(store.parties)) {
+      if (p && doesInviteCodeMatch(p.inviteCode, normalizedCode)) {
+        removeLeftKeyServer(p.id, cleanEmail);
+      }
+    }
+
     // Pull latest state for this 6-character code from Dual-Engine Cloud Sync (Ntfy + Firestore)
     await pullPartyByInviteCodeFromCloud(store as any, normalizedCode, {
       forceFresh: true,
@@ -1975,7 +1960,8 @@ async function startServer() {
       });
     }
 
-    // Clear any previous "left" or "cleared" marker if the roommate is joining via invite code
+    // Clear any previous "left", "deleted", or "cleared" marker if the roommate is joining via invite code
+    store.deletedPartyIds = store.deletedPartyIds.filter((id) => id !== matchingParty!.id);
     if (Array.isArray(store.clearedPartyUsers)) {
       store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== cleanEmail);
     }
@@ -2067,6 +2053,7 @@ async function startServer() {
       existingMember.uid = acc.uid;
       existingMember.displayName = acc.displayName;
       if (acc.photoURL) existingMember.photoURL = acc.photoURL;
+      existingMember.joinedAt = nowIso;
       matchingParty.memberIds = matchingParty.members.map((m) => m.uid);
       matchingParty.updatedAt = nowIso;
     }
@@ -2076,6 +2063,7 @@ async function startServer() {
       forceWrite: true,
       rejoinedEmail: cleanEmail,
     });
+    syncPartyToCloudFirestoreRest(matchingParty.id).catch(() => {});
     sendBackgroundWebPush({
       targetEmails: [matchingParty.hostEmail],
       targetUserIds: [matchingParty.hostId],
@@ -2120,6 +2108,9 @@ async function startServer() {
       return res.status(400).json({ error: 'Please sign in with your email first.' });
     }
 
+    if (partyId) {
+      removeLeftKeyServer(String(partyId), cleanEmail);
+    }
     hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
     await syncStoreWithCloud(store as any, {
       email: cleanEmail,
@@ -2288,6 +2279,7 @@ async function startServer() {
       existingMember.uid = acc.uid;
       existingMember.displayName = acc.displayName;
       if (acc.photoURL) existingMember.photoURL = acc.photoURL;
+      existingMember.joinedAt = nowIso;
       targetParty.memberIds = targetParty.members.map((m: HouseholdMember) => m.uid);
       targetParty.updatedAt = nowIso;
     }
@@ -2297,6 +2289,7 @@ async function startServer() {
       forceWrite: true,
       rejoinedEmail: cleanEmail,
     });
+    syncPartyToCloudFirestoreRest(targetParty.id).catch(() => {});
     sendBackgroundWebPush({
       targetEmails: [targetParty.hostEmail],
       targetUserIds: [targetParty.hostId],
@@ -2628,6 +2621,15 @@ async function startServer() {
         error: 'Please enter a valid email address so they receive the invitation in their Invitations tab.',
       });
     }
+
+    const wasPreviouslyLeft = isLeftKeyMatchedServer(party.id, cleanEmail);
+    removeLeftKeyServer(party.id, cleanEmail);
+
+    if (wasPreviouslyLeft) {
+      party.members = party.members.filter((m) => m.email.toLowerCase() !== cleanEmail);
+      party.memberIds = party.members.map((m) => m.uid);
+    }
+
     if (party.members.some((m) => m.email.toLowerCase() === cleanEmail)) {
       return res.status(409).json({ error: 'A member with this email is already in the party.' });
     }
@@ -2635,25 +2637,18 @@ async function startServer() {
       return res.status(400).json({ error: 'Maximum household size (12 members) reached.' });
     }
 
-    store.leftPartyKeys = store.leftPartyKeys.filter((k) => k !== `${party.id}:${cleanEmail}`);
-
     const nowIso = new Date().toISOString();
     const hostMember =
       party.members.find((m) => m.uid === party.hostId) || party.members[0];
     const formattedCode = formatSixCharInviteCode(party.inviteCode);
 
-    // Create or refresh PENDING HouseholdInvitation for this email address
-    const existingInviteIdx = store.invitations.findIndex(
-      (inv) =>
-        inv.partyId === party.id &&
-        inv.invitedEmail.toLowerCase() === cleanEmail
+    // Remove any older ACCEPTED/DECLINED/PENDING invitations for this party & email and create a fresh PENDING invitation
+    store.invitations = store.invitations.filter(
+      (inv) => !(inv.partyId === party.id && inv.invitedEmail.toLowerCase() === cleanEmail)
     );
 
     const invitationRecord: HouseholdInvitation = {
-      id:
-        existingInviteIdx >= 0
-          ? store.invitations[existingInviteIdx].id
-          : `inv_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      id: `inv_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
       partyId: party.id,
       partyName: party.name,
       inviteCode: formattedCode,
@@ -2668,11 +2663,7 @@ async function startServer() {
       partySnapshot: compactPartyForCloud(party),
     };
 
-    if (existingInviteIdx >= 0) {
-      store.invitations[existingInviteIdx] = invitationRecord;
-    } else {
-      store.invitations.unshift(invitationRecord);
-    }
+    store.invitations.unshift(invitationRecord);
 
     if (!store.alertsByParty[party.id]) store.alertsByParty[party.id] = [];
     store.alertsByParty[party.id].unshift({
@@ -2693,7 +2684,10 @@ async function startServer() {
     });
 
     saveStore();
-    await pushPartyStoreToCloud(store as any, party.id, { forceWrite: true });
+    await pushPartyStoreToCloud(store as any, party.id, {
+      forceWrite: true,
+      rejoinedEmail: cleanEmail,
+    });
     sendBackgroundWebPush({
       targetEmails: [cleanEmail],
       partyId: party.id,
@@ -2714,6 +2708,9 @@ async function startServer() {
     const {
       partyId,
       userId,
+      userEmail,
+      userDisplayName,
+      userPhotoURL,
       imageUrl,
       locationNote,
       verifyImmediatelyAsHost = false,
@@ -2729,10 +2726,27 @@ async function startServer() {
     }
 
     const nowIso = new Date().toISOString();
-    const completingMember =
-      party.members.find((m) => m.uid === userId) ||
+    const cleanUploaderEmail = String(userEmail || '').trim().toLowerCase();
+
+    // Resolve the actual member who uploaded the photo (by uid or email) so out-of-turn uploads credit the real uploader
+    const matchedUploader =
+      party.members.find(
+        (m) =>
+          (userId && m.uid === userId) ||
+          (cleanUploaderEmail && m.email.toLowerCase() === cleanUploaderEmail)
+      ) ||
       party.members.find((m) => m.uid === party.currentTurnUserId) ||
       party.members[0];
+
+    const completingMember: HouseholdMember = {
+      ...matchedUploader,
+      displayName: String(userDisplayName || matchedUploader.displayName || 'Roommate').trim(),
+      photoURL: chooseBestAvatar(
+        matchedUploader.photoURL,
+        userPhotoURL,
+        cleanUploaderEmail || matchedUploader.email
+      ),
+    };
 
     const previousDeadlineIso = party.nextDeadline;
     const completedOnTime = new Date(nowIso).getTime() <= new Date(previousDeadlineIso).getTime();
