@@ -2368,7 +2368,7 @@ async function executeClientFallbackRoute(
       status: 200,
       data: {
         publicKey:
-          'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U',
+          'BBlcgquiiX4Z2nB_QHC0Kw95BUF6OZXyc64av5PeM5eFR3E49jEQFCynwwO2InaDlpteGl2WjluaRgFZDLio5Xk',
       },
     };
   }

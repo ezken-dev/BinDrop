@@ -39,7 +39,9 @@ import {
   pullPartyByIdFromCloud,
   pullPartyByInviteCodeFromCloud,
   pushPartyStoreToCloud,
+  readCloudDoc,
   syncStoreWithCloud,
+  writeCloudDoc,
   writeMemberAvatarToCloud,
   writeUserMembershipToCloud,
 } from './src/utils/cloudPartySync.js';
@@ -54,6 +56,14 @@ const DB_FILE_PATH = path.join(DATA_DIR, 'bindrop-store.json');
 // Dedicated Official BinDrop Email Credentials integrated into the app
 const DEFAULT_OFFICIAL_EMAIL = OFFICIAL_BINDROP_EMAIL; // bindropofficial@gmail.com
 const DEFAULT_OFFICIAL_PASS = process.env.BINDROP_EMAIL_PASSWORD || 'EzKen_2005';
+
+// Canonical persistent VAPID keys so background Web Push subscriptions never break on container restarts
+const DEFAULT_VAPID_PUBLIC_KEY =
+  process.env.VAPID_PUBLIC_KEY ||
+  'BBlcgquiiX4Z2nB_QHC0Kw95BUF6OZXyc64av5PeM5eFR3E49jEQFCynwwO2InaDlpteGl2WjluaRgFZDLio5Xk';
+const DEFAULT_VAPID_PRIVATE_KEY =
+  process.env.VAPID_PRIVATE_KEY ||
+  'SE8vzJOad93rQQwjldBmEOuQhaTrfU4X0NHYRYXfZ4k';
 
 interface StoredUserAccount {
   uid: string;
@@ -191,6 +201,13 @@ function loadStore(): PersistentStore {
         deletedPartyIds: deletedIds,
         leftPartyKeys: parsed.leftPartyKeys || [],
         clearedPartyUsers: parsed.clearedPartyUsers || [],
+        vapidKeys: {
+          publicKey: DEFAULT_VAPID_PUBLIC_KEY,
+          privateKey: DEFAULT_VAPID_PRIVATE_KEY,
+        },
+        pushSubscriptions: Array.isArray(parsed.pushSubscriptions)
+          ? parsed.pushSubscriptions
+          : [],
         officialEmailConfig: existingCfg
           ? {
               email: DEFAULT_OFFICIAL_EMAIL,
@@ -222,6 +239,11 @@ function loadStore(): PersistentStore {
     deletedPartyIds: [],
     leftPartyKeys: [],
     clearedPartyUsers: [],
+    vapidKeys: {
+      publicKey: DEFAULT_VAPID_PUBLIC_KEY,
+      privateKey: DEFAULT_VAPID_PRIVATE_KEY,
+    },
+    pushSubscriptions: [],
     officialEmailConfig: {
       email: DEFAULT_OFFICIAL_EMAIL,
       password: DEFAULT_OFFICIAL_PASS,
@@ -234,14 +256,11 @@ function loadStore(): PersistentStore {
 
 const store: PersistentStore = loadStore();
 
-// Initialize or load persistent VAPID keys for background Web Push notifications
-if (!store.vapidKeys || !store.vapidKeys.publicKey || !store.vapidKeys.privateKey) {
-  const generated = webpush.generateVAPIDKeys();
-  store.vapidKeys = {
-    publicKey: process.env.VAPID_PUBLIC_KEY || generated.publicKey,
-    privateKey: process.env.VAPID_PRIVATE_KEY || generated.privateKey,
-  };
-}
+// Ensure canonical VAPID keys are always active for background Web Push notifications
+store.vapidKeys = {
+  publicKey: DEFAULT_VAPID_PUBLIC_KEY,
+  privateKey: DEFAULT_VAPID_PRIVATE_KEY,
+};
 if (!Array.isArray(store.pushSubscriptions)) {
   store.pushSubscriptions = [];
 }
@@ -482,20 +501,40 @@ async function sendBackgroundWebPush(params: {
   senderName?: string;
   url?: string;
 }): Promise<number> {
-  // Also pull any subscriptions saved directly to Cloud Firestore by static/mobile clients
-  const cloudSubs = await readCloudFirestoreRestDoc<StoredPushSubscription[]>('push_subs');
-  if (Array.isArray(cloudSubs)) {
+  // Pull any subscriptions saved via Dual-Engine Cloud Sync (`readCloudDoc`) or Firestore REST
+  try {
+    const [dualCloudSubs, restCloudSubs] = await Promise.all([
+      readCloudDoc<StoredPushSubscription[]>('push_subs').catch(() => null),
+      readCloudFirestoreRestDoc<StoredPushSubscription[]>('push_subs').catch(() => null),
+    ]);
     if (!Array.isArray(store.pushSubscriptions)) store.pushSubscriptions = [];
-    for (const cs of cloudSubs) {
-      if (
-        cs &&
-        cs.endpoint &&
-        cs.subscription &&
-        !store.pushSubscriptions.some((s) => s.endpoint === cs.endpoint)
-      ) {
-        store.pushSubscriptions.push(cs);
+    let mergedNew = false;
+    for (const list of [dualCloudSubs, restCloudSubs]) {
+      if (!Array.isArray(list)) continue;
+      for (const cs of list) {
+        if (!cs || !cs.endpoint || !cs.subscription) continue;
+        const existingIdx = store.pushSubscriptions.findIndex((s) => s.endpoint === cs.endpoint);
+        if (existingIdx < 0) {
+          store.pushSubscriptions.push(cs);
+          mergedNew = true;
+        } else {
+          // Keep userEmail and partyId updated if recently linked
+          if (cs.userEmail && !store.pushSubscriptions[existingIdx].userEmail) {
+            store.pushSubscriptions[existingIdx].userEmail = cs.userEmail;
+            mergedNew = true;
+          }
+          if (cs.partyId && store.pushSubscriptions[existingIdx].partyId !== cs.partyId) {
+            store.pushSubscriptions[existingIdx].partyId = cs.partyId;
+            mergedNew = true;
+          }
+        }
       }
     }
+    if (mergedNew) {
+      saveStore();
+    }
+  } catch {
+    // ignore cloud read errors
   }
 
   const subs = store.pushSubscriptions || [];
@@ -549,14 +588,11 @@ async function sendBackgroundWebPush(params: {
       try {
         await webpush.sendNotification(subRecord.subscription, payloadStr, {
           TTL: 86400,
-          urgency:
-            params.category === 'WARNING_5H' || params.category === 'MISSED_DEADLINE'
-              ? 'high'
-              : 'normal',
+          urgency: 'high',
         });
         sentCount++;
       } catch (err: any) {
-        if (err?.statusCode === 404 || err?.statusCode === 410) {
+        if (err?.statusCode === 404 || err?.statusCode === 410 || err?.statusCode === 403) {
           expiredEndpoints.add(subRecord.endpoint);
         }
       }
@@ -568,6 +604,7 @@ async function sendBackgroundWebPush(params: {
       (s) => !expiredEndpoints.has(s.endpoint)
     );
     saveStore();
+    writeCloudDoc('push_subs', 'PUSH_SUBS', store.pushSubscriptions.slice(0, 50)).catch(() => {});
   }
 
   return sentCount;
@@ -1293,6 +1330,26 @@ async function startServer() {
 
   app.use(express.json({ limit: '15mb' }));
 
+  // Hydrate push subscriptions from cloud on startup so closed phones receive notifications immediately
+  readCloudDoc<StoredPushSubscription[]>('push_subs')
+    .then((cloudSubs) => {
+      if (Array.isArray(cloudSubs)) {
+        if (!Array.isArray(store.pushSubscriptions)) store.pushSubscriptions = [];
+        for (const cs of cloudSubs) {
+          if (
+            cs &&
+            cs.endpoint &&
+            cs.subscription &&
+            !store.pushSubscriptions.some((s) => s.endpoint === cs.endpoint)
+          ) {
+            store.pushSubscriptions.push(cs);
+          }
+        }
+        saveStore();
+      }
+    })
+    .catch(() => {});
+
   // Publish active parties to Dual-Engine Cloud Sync on startup so their 6-char codes are discoverable everywhere
   for (const partyId of Object.keys(store.parties)) {
     if (!isFakeStubParty(store.parties[partyId])) {
@@ -1300,8 +1357,13 @@ async function startServer() {
     }
   }
 
-  // Background 10-second automated deadline & pop-up notification monitor
-  setInterval(() => {
+  // Background 10-second automated deadline & closed-app Web Push notification monitor
+  let sweepTickCount = 0;
+  setInterval(async () => {
+    sweepTickCount += 1;
+    if (sweepTickCount % 3 === 0) {
+      await syncStoreWithCloud(store as any, {}).catch(() => {});
+    }
     for (const partyId of Object.keys(store.parties)) {
       evaluateAndDispatchPartyDeadlines(partyId).catch((err) =>
         console.error('Background sweep error:', err)
@@ -2209,6 +2271,15 @@ async function startServer() {
 
     saveStore();
     await pushPartyStoreToCloud(store as any, targetParty.id, { forceWrite: true });
+    sendBackgroundWebPush({
+      targetEmails: [targetParty.hostEmail],
+      targetUserIds: [targetParty.hostId],
+      partyId: targetParty.id,
+      title: `🎉 ${acc.displayName} Accepted Your Party Invite!`,
+      body: `${acc.displayName} (${acc.email}) joined "${targetParty.name}" on BinDrop!`,
+      category: 'MEMBER_JOINED',
+      senderName: acc.displayName,
+    }).catch(() => {});
     return res.json({
       ok: true,
       decision: 'ACCEPTED',
@@ -2330,6 +2401,17 @@ async function startServer() {
         createdAt: nowIso,
       });
       pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
+      sendBackgroundWebPush({
+        targetEmails: [leaveResult.updatedParty.hostEmail],
+        targetUserIds: [leaveResult.updatedParty.hostId],
+        partyId,
+        title: leaveResult.hostTransferred
+          ? `👑 Host Transferred to ${leaveResult.promotedHost?.displayName}`
+          : `🚪 ${leaverName} Left ${party.name}`,
+        body: `${leaverName} left the household party.${transferNote}`,
+        category: 'PARTY_UPDATED',
+        senderName: leaverName,
+      }).catch(() => {});
     }
 
     saveStore();
@@ -2737,6 +2819,32 @@ async function startServer() {
 
       saveStore();
       await pushPartyStoreToCloud(store as any, partyId, { forceWrite: true });
+
+      // Wake closed phones via Web Push (FCM / APNs)
+      sendBackgroundWebPush({
+        targetEmails: [nextAssignee.email],
+        targetUserIds: [nextAssignee.uid],
+        partyId,
+        title: `🗑️ Your Turn for Trash Duty · ${party.name}`,
+        body: `${completingMember.displayName} completed trash duty (+${scoreResult.pointsAwarded} pts)! You are now up next.`,
+        category: 'PHOTO_VERIFIED',
+        senderName: completingMember.displayName,
+      }).catch(() => {});
+
+      const otherMemberEmails = rotated.members
+        .map((m) => m.email.toLowerCase())
+        .filter((e) => e !== nextAssignee.email.toLowerCase());
+      if (otherMemberEmails.length > 0) {
+        sendBackgroundWebPush({
+          targetEmails: otherMemberEmails,
+          partyId,
+          title: `✅ Trash Drop Verified (+${scoreResult.pointsAwarded} pts) · ${party.name}`,
+          body: `${completingMember.displayName} completed trash duty! Next up: ${nextAssignee.displayName}.`,
+          category: 'PHOTO_VERIFIED',
+          senderName: completingMember.displayName,
+        }).catch(() => {});
+      }
+
       return res.json({
         drop: verifiedDrop,
         bundle: await buildPartyBundle(partyId),
@@ -2786,6 +2894,18 @@ async function startServer() {
 
     saveStore();
     await pushPartyStoreToCloud(store as any, partyId, { forceWrite: true });
+
+    // Wake Host's closed phone via Web Push so they can verify the photo
+    sendBackgroundWebPush({
+      targetEmails: [party.hostEmail],
+      targetUserIds: [party.hostId],
+      partyId,
+      title: `📸 New Trash Photo from ${completingMember.displayName}`,
+      body: `${completingMember.displayName} uploaded proof ("${cleanNote}") at ${party.name}. Tap to verify & approve!`,
+      category: 'PHOTO_SUBMITTED',
+      senderName: completingMember.displayName,
+    }).catch(() => {});
+
     return res.json({
       drop: pendingDrop,
       bundle: await buildPartyBundle(partyId),
@@ -2851,6 +2971,15 @@ async function startServer() {
 
       saveStore();
       pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
+      sendBackgroundWebPush({
+        targetEmails: [targetDrop.userEmail],
+        targetUserIds: [targetDrop.userId],
+        partyId,
+        title: `⚠️ Trash Photo Needs Retake · ${party.name}`,
+        body: `Host ${verifierName} requested a clearer trash photo: "${targetDrop.hostReviewNote}"`,
+        category: 'PHOTO_SUBMITTED',
+        senderName: verifierName,
+      }).catch(() => {});
       return res.json({
         drop: targetDrop,
         bundle: await buildPartyBundle(partyId),
@@ -2949,6 +3078,27 @@ async function startServer() {
         read: false,
         createdAt: nowIso,
       });
+      sendBackgroundWebPush({
+        targetEmails: [completingMember.email],
+        targetUserIds: [completingMember.uid],
+        partyId,
+        title: `✅ Photo Approved (+${scoreResult.pointsAwarded} pts) · ${party.name}`,
+        body: `Host ${verifierName} approved your trash photo! ${nextAssignee.displayName} is now on trash duty.`,
+        category: 'PHOTO_VERIFIED',
+        senderName: verifierName,
+      }).catch(() => {});
+
+      if (nextAssignee.email.toLowerCase() !== completingMember.email.toLowerCase()) {
+        sendBackgroundWebPush({
+          targetEmails: [nextAssignee.email],
+          targetUserIds: [nextAssignee.uid],
+          partyId,
+          title: `🗑️ Your Turn for Trash Duty · ${party.name}`,
+          body: `${completingMember.displayName}'s turn was approved. You are now up for trash duty!`,
+          category: 'TURN_REMINDER',
+          senderName: party.name,
+        }).catch(() => {});
+      }
     }
 
     saveStore();
@@ -3070,6 +3220,15 @@ async function startServer() {
 
     saveStore();
     pushPartyStoreToCloud(store as any, partyId, { forceWrite: true }).catch(() => {});
+    sendBackgroundWebPush({
+      targetEmails: [nextMember.email],
+      targetUserIds: [nextMember.uid],
+      partyId,
+      title: `⏭️ Turn Rotated · You're Up for Trash Duty!`,
+      body: `Party Host rotated the turn from ${skippedMember.displayName} to ${nextMember.displayName} at ${party.name}.`,
+      category: 'TURN_REMINDER',
+      senderName: `${party.name} Host`,
+    }).catch(() => {});
     return res.json({ bundle: await buildPartyBundle(partyId) });
   });
 
@@ -3267,7 +3426,8 @@ async function startServer() {
   });
 
   app.post('/api/push/subscribe', (req, res) => {
-    const { userEmail, userUid, userDisplayName, partyId, subscription, userAgent } = req.body || {};
+    const { userEmail, userUid, userDisplayName, partyId, subscription, oldEndpoint, userAgent } =
+      req.body || {};
     const cleanEmail = String(userEmail || '').trim().toLowerCase();
     if (!subscription || !subscription.endpoint) {
       return res.status(400).json({ error: 'Invalid PushSubscription object.' });
@@ -3277,25 +3437,34 @@ async function startServer() {
       store.pushSubscriptions = [];
     }
 
+    const existingRecord = store.pushSubscriptions.find(
+      (s) => s.endpoint === subscription.endpoint || (oldEndpoint && s.endpoint === oldEndpoint)
+    );
+    const resolvedEmail = cleanEmail || existingRecord?.userEmail || '';
+    const resolvedUid = userUid ? String(userUid) : existingRecord?.userUid;
+    const resolvedName = userDisplayName ? String(userDisplayName) : existingRecord?.userDisplayName;
+    const resolvedPartyId =
+      partyId !== undefined ? (partyId ? String(partyId) : null) : existingRecord?.partyId || null;
+
     const nowIso = new Date().toISOString();
     store.pushSubscriptions = store.pushSubscriptions.filter(
-      (s) => s.endpoint !== subscription.endpoint
+      (s) => s.endpoint !== subscription.endpoint && (!oldEndpoint || s.endpoint !== oldEndpoint)
     );
     store.pushSubscriptions.unshift({
-      userEmail: cleanEmail,
-      userUid: userUid ? String(userUid) : undefined,
-      userDisplayName: userDisplayName ? String(userDisplayName) : undefined,
-      partyId: partyId ? String(partyId) : null,
+      userEmail: resolvedEmail,
+      userUid: resolvedUid,
+      userDisplayName: resolvedName,
+      partyId: resolvedPartyId,
       endpoint: subscription.endpoint,
       subscription,
-      userAgent: userAgent ? String(userAgent) : undefined,
+      userAgent: userAgent ? String(userAgent) : existingRecord?.userAgent,
       updatedAt: nowIso,
     });
 
     saveStore();
-    writeCloudFirestoreRestDoc('push_subs', 'PUSH_SUBS', store.pushSubscriptions.slice(0, 60)).catch(
-      () => {}
-    );
+    const trimmedSubs = store.pushSubscriptions.slice(0, 60);
+    writeCloudDoc('push_subs', 'PUSH_SUBS', trimmedSubs).catch(() => {});
+    writeCloudFirestoreRestDoc('push_subs', 'PUSH_SUBS', trimmedSubs).catch(() => {});
 
     return res.json({
       ok: true,
@@ -3313,6 +3482,9 @@ async function startServer() {
         return true;
       });
       saveStore();
+      const trimmedSubs = store.pushSubscriptions.slice(0, 60);
+      writeCloudDoc('push_subs', 'PUSH_SUBS', trimmedSubs).catch(() => {});
+      writeCloudFirestoreRestDoc('push_subs', 'PUSH_SUBS', trimmedSubs).catch(() => {});
     }
     return res.json({ ok: true });
   });

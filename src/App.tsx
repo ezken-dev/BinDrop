@@ -76,6 +76,7 @@ import {
 import { apiFetch, getInitialCachedBundleForAccount } from './utils/apiClient';
 import { chooseBestAvatar, setCachedMemberAvatar } from './utils/cloudPartySync';
 import {
+  autoSyncAndHealPushSubscription,
   registerBinDropServiceWorker,
   triggerSystemNotificationViaServiceWorker,
 } from './utils/pushClient';
@@ -380,6 +381,23 @@ export default function App() {
     navigator.serviceWorker.addEventListener('message', handleSwMessage);
     return () => navigator.serviceWorker.removeEventListener('message', handleSwMessage);
   }, [party?.id, party?.name, currentAccount?.uid, currentAccount?.displayName, currentAccount?.email]);
+
+  // Automatically sync & self-heal background Web Push subscription when user logs in or switches party
+  useEffect(() => {
+    if (!currentAccount?.email) return;
+    autoSyncAndHealPushSubscription({
+      userEmail: currentAccount.email,
+      userUid: currentAccount.uid,
+      userDisplayName: currentAccount.displayName,
+      partyId: party?.id || currentAccount.partyId || null,
+    }).catch(() => {});
+  }, [
+    currentAccount?.email,
+    currentAccount?.uid,
+    currentAccount?.displayName,
+    currentAccount?.partyId,
+    party?.id,
+  ]);
 
   // Cloud sync is handled by apiFetch + Dual-Engine Cloud Sync (cloudPartySync.ts)
   const syncPartyToFirestore = useCallback(

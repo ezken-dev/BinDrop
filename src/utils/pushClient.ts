@@ -1,11 +1,11 @@
 import { apiFetch } from './apiClient';
 import { readCloudDoc, writeCloudDoc } from './cloudPartySync';
 
-// Default fallback public VAPID key (overridden dynamically by /api/push/vapid-public-key when backend is reachable)
+// Canonical persistent VAPID public key shared with server.ts so mobile subscriptions never invalidate across server restarts
 export const FALLBACK_VAPID_PUBLIC_KEY =
-  'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U';
+  'BBlcgquiiX4Z2nB_QHC0Kw95BUF6OZXyc64av5PeM5eFR3E49jEQFCynwwO2InaDlpteGl2WjluaRgFZDLio5Xk';
 
-const PUSH_SUB_STORAGE_KEY = 'bindrop_webpush_subscription_v2';
+const PUSH_SUB_STORAGE_KEY = 'bindrop_webpush_subscription_v3';
 
 export interface MobilePushEnvironment {
   isIOS: boolean;
@@ -33,6 +33,30 @@ export function urlBase64ToUint8Array(base64String: string): Uint8Array {
     outputArray[i] = rawData.charCodeAt(i);
   }
   return outputArray;
+}
+
+/**
+ * Verifies whether an existing browser PushSubscription was created with the current VAPID public key.
+ * If a subscription was created with an older VAPID key, it must be unsubscribed and re-created so
+ * closed-app background pushes are accepted by FCM/APNs.
+ */
+function doesSubscriptionMatchVapidKey(
+  sub: PushSubscription,
+  expectedPublicKeyBase64: string
+): boolean {
+  try {
+    const appServerKey = sub.options?.applicationServerKey;
+    if (!appServerKey) return false;
+    const actualBytes = new Uint8Array(appServerKey);
+    const expectedBytes = urlBase64ToUint8Array(expectedPublicKeyBase64);
+    if (actualBytes.length !== expectedBytes.length) return false;
+    for (let i = 0; i < actualBytes.length; i++) {
+      if (actualBytes[i] !== expectedBytes[i]) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -109,7 +133,9 @@ export async function registerBinDropServiceWorker(): Promise<ServiceWorkerRegis
   try {
     const registration = await navigator.serviceWorker.register('/sw.js', {
       scope: '/',
+      updateViaCache: 'none',
     });
+    registration.update().catch(() => {});
     await navigator.serviceWorker.ready;
     return registration;
   } catch (err) {
@@ -120,7 +146,9 @@ export async function registerBinDropServiceWorker(): Promise<ServiceWorkerRegis
 
 export function getSavedLocalPushState(): {
   enabled: boolean;
+  explicitlyDisabled?: boolean;
   endpoint?: string;
+  vapidKey?: string;
   updatedAt?: string;
 } {
   try {
@@ -134,7 +162,13 @@ export function getSavedLocalPushState(): {
   return { enabled: false };
 }
 
-function saveLocalPushState(state: { enabled: boolean; endpoint?: string; updatedAt?: string }) {
+function saveLocalPushState(state: {
+  enabled: boolean;
+  explicitlyDisabled?: boolean;
+  endpoint?: string;
+  vapidKey?: string;
+  updatedAt?: string;
+}) {
   try {
     localStorage.setItem(PUSH_SUB_STORAGE_KEY, JSON.stringify(state));
   } catch {
@@ -209,12 +243,148 @@ export async function triggerSystemNotificationViaServiceWorker(params: {
 }
 
 /**
+ * Internal helper that ensures the browser's PushManager subscription matches the server's
+ * VAPID public key and registers the subscription with both the Express backend and Cloud Sync.
+ */
+async function ensureValidPushSubscriptionAndRegister(params: {
+  userEmail: string;
+  userUid?: string;
+  userDisplayName?: string;
+  partyId?: string | null;
+}): Promise<PushSubscriptionJSON | null> {
+  const registration = await registerBinDropServiceWorker();
+
+  let vapidPublicKey = FALLBACK_VAPID_PUBLIC_KEY;
+  try {
+    const keyRes = await apiFetch<{ publicKey?: string }>('/api/push/vapid-public-key');
+    if (keyRes.ok && keyRes.data?.publicKey) {
+      vapidPublicKey = keyRes.data.publicKey;
+    }
+  } catch {
+    // Use canonical fallback VAPID key if offline
+  }
+
+  let subscriptionJson: PushSubscriptionJSON | null = null;
+  if (registration && 'pushManager' in registration) {
+    try {
+      const existingSub = await registration.pushManager.getSubscription();
+      if (existingSub && doesSubscriptionMatchVapidKey(existingSub, vapidPublicKey)) {
+        subscriptionJson = existingSub.toJSON();
+      } else {
+        if (existingSub) {
+          try {
+            await existingSub.unsubscribe();
+          } catch {
+            // ignore unsubscribe error
+          }
+        }
+        const convertedVapidKey = urlBase64ToUint8Array(vapidPublicKey);
+        const newSub = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: convertedVapidKey as unknown as BufferSource,
+        });
+        subscriptionJson = newSub.toJSON();
+      }
+    } catch (subErr) {
+      console.warn('PushManager subscription note:', subErr);
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const cleanEmail = params.userEmail.trim().toLowerCase();
+
+  if (cleanEmail && subscriptionJson?.endpoint) {
+    try {
+      await apiFetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userEmail: cleanEmail,
+          userUid: params.userUid,
+          userDisplayName: params.userDisplayName,
+          partyId: params.partyId || null,
+          subscription: subscriptionJson,
+          userAgent: navigator.userAgent,
+        }),
+      });
+    } catch {
+      // ignore backend error if static host
+    }
+
+    // Persist in Dual-Engine Cloud Sync `push_subs` so any server instance can wake this phone
+    (async () => {
+      try {
+        const existingList = (await readCloudDoc<any[]>('push_subs')) || [];
+        const filtered = (Array.isArray(existingList) ? existingList : []).filter(
+          (item) => item && item.endpoint !== subscriptionJson?.endpoint
+        );
+        filtered.unshift({
+          userEmail: cleanEmail,
+          userUid: params.userUid,
+          userDisplayName: params.userDisplayName,
+          partyId: params.partyId || null,
+          endpoint: subscriptionJson.endpoint,
+          subscription: subscriptionJson,
+          userAgent: navigator.userAgent,
+          updatedAt: nowIso,
+          updatedAtIso: nowIso,
+        });
+        await writeCloudDoc('push_subs', 'PUSH_SUBS', filtered.slice(0, 50));
+      } catch {
+        // ignore cloud error
+      }
+    })();
+
+    saveLocalPushState({
+      enabled: true,
+      explicitlyDisabled: false,
+      endpoint: subscriptionJson.endpoint,
+      vapidKey: vapidPublicKey,
+      updatedAt: nowIso,
+    });
+  }
+
+  return subscriptionJson;
+}
+
+/**
+ * Automatically heals, re-subscribes (if VAPID key changed), and registers background Web Push
+ * whenever a logged-in user has already granted OS notification permissions.
+ */
+export async function autoSyncAndHealPushSubscription(params: {
+  userEmail?: string | null;
+  userUid?: string;
+  userDisplayName?: string;
+  partyId?: string | null;
+}): Promise<boolean> {
+  const cleanEmail = String(params.userEmail || '').trim().toLowerCase();
+  if (!cleanEmail) return false;
+
+  const env = getMobilePushEnvironment();
+  if (env.iosNeedsHomeScreenInstall || !env.supportsNotifications) {
+    return false;
+  }
+
+  const saved = getSavedLocalPushState();
+  if (saved.explicitlyDisabled) {
+    return false;
+  }
+
+  if (Notification.permission === 'granted') {
+    const sub = await ensureValidPushSubscriptionAndRegister({
+      userEmail: cleanEmail,
+      userUid: params.userUid,
+      userDisplayName: params.userDisplayName,
+      partyId: params.partyId,
+    });
+    return Boolean(sub?.endpoint);
+  }
+
+  return false;
+}
+
+/**
  * Must ONLY be called inside an explicit user click/tap handler (e.g. "Turn on Alerts" toggle switch).
- * 1. Verifies iOS Home Screen rule
- * 2. Requests OS notification permission (`Notification.requestPermission()`)
- * 3. Fetches VAPID public key from backend
- * 4. Subscribes via `registration.pushManager.subscribe`
- * 5. Saves subscription to Backend (`/api/push/subscribe`) and Cloud Firestore (`bindrop_cloud/push_subs`)
  */
 export async function subscribeUserToBackgroundPush(params: {
   userEmail: string;
@@ -248,10 +418,13 @@ export async function subscribeUserToBackgroundPush(params: {
     };
   }
 
-  // Step 1: Request permission directly from the user's click gesture
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') {
-    saveLocalPushState({ enabled: false, updatedAt: new Date().toISOString() });
+    saveLocalPushState({
+      enabled: false,
+      explicitlyDisabled: false,
+      updatedAt: new Date().toISOString(),
+    });
     return {
       ok: false,
       permission,
@@ -262,98 +435,20 @@ export async function subscribeUserToBackgroundPush(params: {
     };
   }
 
-  // Step 2: Register Service Worker
-  const registration = await registerBinDropServiceWorker();
+  const subscriptionJson = await ensureValidPushSubscriptionAndRegister(params);
 
-  // Step 3: Fetch VAPID Public Key from backend
-  let vapidPublicKey = FALLBACK_VAPID_PUBLIC_KEY;
-  try {
-    const keyRes = await apiFetch<{ publicKey?: string }>('/api/push/vapid-public-key');
-    if (keyRes.ok && keyRes.data?.publicKey) {
-      vapidPublicKey = keyRes.data.publicKey;
-    }
-  } catch {
-    // Use fallback VAPID key if offline
-  }
-
-  // Step 4: Generate PushSubscription via PushManager
-  let subscriptionJson: PushSubscriptionJSON | null = null;
-  if (registration && 'pushManager' in registration) {
-    try {
-      const existingSub = await registration.pushManager.getSubscription();
-      if (existingSub) {
-        subscriptionJson = existingSub.toJSON();
-      } else {
-        const convertedVapidKey = urlBase64ToUint8Array(vapidPublicKey);
-        const newSub = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: convertedVapidKey as unknown as BufferSource,
-        });
-        subscriptionJson = newSub.toJSON();
-      }
-    } catch (subErr) {
-      console.warn('PushManager subscription note:', subErr);
-    }
-  }
-
-  const nowIso = new Date().toISOString();
-  const cleanEmail = params.userEmail.trim().toLowerCase();
-
-  // Step 5: Send subscription to Backend & Cloud Firestore
-  try {
-    await apiFetch('/api/push/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userEmail: cleanEmail,
-        userUid: params.userUid,
-        userDisplayName: params.userDisplayName,
-        partyId: params.partyId || null,
-        subscription: subscriptionJson,
-        userAgent: navigator.userAgent,
-      }),
+  if (!subscriptionJson?.endpoint) {
+    saveLocalPushState({
+      enabled: true,
+      explicitlyDisabled: false,
+      endpoint: 'local-sw-notification',
+      updatedAt: new Date().toISOString(),
     });
-  } catch {
-    // ignore backend error if static host
   }
 
-  // Also persist in Dual-Engine Cloud Sync `push_subs` in the background (non-blocking)
-  if (cleanEmail && subscriptionJson?.endpoint) {
-    (async () => {
-      try {
-        const existingList = (await readCloudDoc<any[]>('push_subs')) || [];
-        const filtered = (Array.isArray(existingList) ? existingList : []).filter(
-          (item) =>
-            item &&
-            item.endpoint !== subscriptionJson?.endpoint &&
-            item.userEmail !== cleanEmail
-        );
-        filtered.unshift({
-          userEmail: cleanEmail,
-          userUid: params.userUid,
-          userDisplayName: params.userDisplayName,
-          partyId: params.partyId || null,
-          endpoint: subscriptionJson.endpoint,
-          subscription: subscriptionJson,
-          updatedAtIso: nowIso,
-        });
-        await writeCloudDoc('push_subs', 'PUSH_SUBS', filtered.slice(0, 30));
-      } catch {
-        // ignore cloud error
-      }
-    })();
-  }
-
-  saveLocalPushState({
-    enabled: true,
-    endpoint: subscriptionJson?.endpoint || 'local-sw-notification',
-    updatedAt: nowIso,
-  });
-
-  // Trigger an immediate confirmation alert via Service Worker so the user sees it on their phone right away
   await triggerSystemNotificationViaServiceWorker({
     title: '🔔 BinDrop Lock-Screen Alerts Active!',
-    body: 'You will now receive Instagram-style banner & lock-screen alerts for all household turns, deadlines, and invites.',
+    body: 'You will now receive lock-screen & banner alerts even when BinDrop is completely closed.',
     tag: 'bindrop-alerts-enabled',
     category: 'TURN_REMINDER',
   });
@@ -370,12 +465,18 @@ export async function subscribeUserToBackgroundPush(params: {
 export async function unsubscribeUserFromBackgroundPush(params: {
   userEmail: string;
 }): Promise<void> {
-  saveLocalPushState({ enabled: false, updatedAt: new Date().toISOString() });
+  saveLocalPushState({
+    enabled: false,
+    explicitlyDisabled: true,
+    updatedAt: new Date().toISOString(),
+  });
+  let oldEndpoint: string | undefined;
   try {
     if ('serviceWorker' in navigator) {
       const reg = await navigator.serviceWorker.getRegistration('/');
       const sub = await reg?.pushManager?.getSubscription();
       if (sub) {
+        oldEndpoint = sub.endpoint;
         await sub.unsubscribe();
       }
     }
@@ -389,6 +490,7 @@ export async function unsubscribeUserFromBackgroundPush(params: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userEmail: params.userEmail.trim().toLowerCase(),
+        endpoint: oldEndpoint,
       }),
     });
   } catch {

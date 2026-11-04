@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for the 5 fixes: unobstructed camera viewfinder, working hardware LED torch + screen flash fallback, zero-flicker custom profile picture persistence + animated Save Profile button, host-only rotation cycle control, and instant cross-device Google login party sync between phone and PC.",
-  "updatedAt": "2026-11-04T06:11:18.590265388Z",
+  "summary": "Implementation plan to enable reliable background lock-screen Web Push notifications on Android and iOS even when BinDrop is completely closed or swiped away, covering all household events, deterministic VAPID keys, and automatic subscription self-healing on login.",
+  "updatedAt": "2026-11-04T06:48:50.394799538Z",
   "requestFeedback": true,
   "userFacing": true
 }

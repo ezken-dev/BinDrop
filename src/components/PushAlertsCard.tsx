@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import {
+  autoSyncAndHealPushSubscription,
   getMobilePushEnvironment,
   getSavedLocalPushState,
   subscribeUserToBackgroundPush,
@@ -44,7 +45,7 @@ export const PushAlertsCard: React.FC<PushAlertsCardProps> = ({
   const [alertsEnabled, setAlertsEnabled] = useState<boolean>(() => {
     const saved = getSavedLocalPushState();
     const currentEnv = getMobilePushEnvironment();
-    return saved.enabled && currentEnv.permission === 'granted';
+    return !saved.explicitlyDisabled && currentEnv.permission === 'granted';
   });
   const [busy, setBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -56,12 +57,21 @@ export const PushAlertsCard: React.FC<PushAlertsCardProps> = ({
       const nextEnv = getMobilePushEnvironment();
       setEnv(nextEnv);
       const saved = getSavedLocalPushState();
-      setAlertsEnabled(saved.enabled && nextEnv.permission === 'granted');
+      const shouldBeEnabled = !saved.explicitlyDisabled && nextEnv.permission === 'granted';
+      setAlertsEnabled(shouldBeEnabled);
+      if (shouldBeEnabled && userEmail) {
+        autoSyncAndHealPushSubscription({
+          userEmail,
+          userUid,
+          userDisplayName,
+          partyId,
+        }).catch(() => {});
+      }
     };
     refreshEnv();
     window.addEventListener('focus', refreshEnv);
     return () => window.removeEventListener('focus', refreshEnv);
-  }, []);
+  }, [userEmail, userUid, userDisplayName, partyId]);
 
   const handleToggleAlerts = async () => {
     setErrorMessage(null);

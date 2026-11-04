@@ -1,10 +1,13 @@
 /* eslint-disable no-restricted-globals */
 // BinDrop Background Service Worker (sw.js)
-// Provides offline-capable fetch handling (required by Chromium, Brave, Vivo, and Samsung browsers
-// for native standalone PWA / WebAPK installation) and system-level Web Push notifications.
+// Provides offline-capable fetch handling and background Web Push lock-screen notifications
+// on Android (FCM) and iOS 16.4+ Home Screen PWAs (APNs) even when the app is completely closed.
 
-const SW_VERSION = 'bindrop-sw-v5';
-const CACHE_NAME = 'bindrop-pwa-cache-v5';
+const SW_VERSION = 'bindrop-sw-v6';
+const CACHE_NAME = 'bindrop-pwa-cache-v6';
+const DEFAULT_VAPID_PUBLIC_KEY =
+  'BBlcgquiiX4Z2nB_QHC0Kw95BUF6OZXyc64av5PeM5eFR3E49jEQFCynwwO2InaDlpteGl2WjluaRgFZDLio5Xk';
+
 const APP_SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -15,6 +18,17 @@ const APP_SHELL_ASSETS = [
   '/apple-touch-icon.png',
   '/badge-72x72.png',
 ];
+
+function urlBase64ToUint8ArraySw(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -44,14 +58,12 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Required fetch handler so all Android browsers (Brave, Vivo, Chrome, Samsung Internet, Edge)
-// pass the PWA installability check and offer "Install App" instead of a browser shortcut.
+// Required fetch handler so all Android browsers pass the PWA installability check
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
-  // Always bypass cache for API, cloud sync, or cross-origin requests
   if (
     url.origin !== self.location.origin ||
     url.pathname.startsWith('/api/')
@@ -59,7 +71,6 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Network-first with cache fallback for HTML navigations and static assets
   event.respondWith(
     fetch(req)
       .then((networkRes) => {
@@ -84,7 +95,7 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Listen for encrypted background Web Push payloads from the OS push daemon
+// Listen for encrypted background Web Push payloads from the OS push daemon (works when app is completely closed)
 self.addEventListener('push', (event) => {
   const origin = self.location.origin;
   const defaultIconUrl = new URL('/pwa-192x192.png', origin).href;
@@ -129,8 +140,10 @@ self.addEventListener('push', (event) => {
     tag: payload.tag,
     renotify: true,
     requireInteraction:
-      payload.category === 'WARNING_5H' || payload.category === 'MISSED_DEADLINE',
-    vibrate: [200, 100, 200, 100, 300],
+      payload.category === 'WARNING_5H' ||
+      payload.category === 'MISSED_DEADLINE' ||
+      payload.category === 'PHOTO_SUBMITTED',
+    vibrate: [220, 100, 220, 100, 320],
     data: {
       url: payload.url || '/',
       category: payload.category,
@@ -162,6 +175,37 @@ self.addEventListener('push', (event) => {
       self.registration.showNotification(payload.title, notificationOptions),
       notifyClientsPromise,
     ])
+  );
+});
+
+// Automatically renew Web Push subscription if Android FCM or iOS APNs rotates the device token in the background
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        const applicationServerKey =
+          (event.oldSubscription &&
+            event.oldSubscription.options &&
+            event.oldSubscription.options.applicationServerKey) ||
+          urlBase64ToUint8ArraySw(DEFAULT_VAPID_PUBLIC_KEY);
+
+        const newSubscription = await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey,
+        });
+
+        await fetch('/api/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subscription: newSubscription.toJSON(),
+            oldEndpoint: event.oldSubscription ? event.oldSubscription.endpoint : undefined,
+          }),
+        });
+      } catch {
+        // ignore background renewal network errors
+      }
+    })()
   );
 });
 
