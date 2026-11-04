@@ -78,7 +78,6 @@ import { chooseBestAvatar, setCachedMemberAvatar } from './utils/cloudPartySync'
 import {
   autoSyncAndHealPushSubscription,
   registerBinDropServiceWorker,
-  triggerSystemNotificationViaServiceWorker,
 } from './utils/pushClient';
 
 type ActiveTab = 'hud' | 'admin' | 'party' | 'profile';
@@ -127,22 +126,6 @@ function playSocialNotificationChime() {
     osc2.stop(now + 0.34);
   } catch {
     // AudioContext may be blocked before user interaction
-  }
-}
-
-function triggerBrowserPushNotification(title: string, body: string, tag?: string) {
-  try {
-    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-      navigator.vibrate([120, 60, 120]);
-    }
-    triggerSystemNotificationViaServiceWorker({
-      title,
-      body,
-      tag: tag || `bindrop_${Date.now()}`,
-      category: 'TURN_REMINDER',
-    }).catch(() => {});
-  } catch {
-    // ignore browser notification errors in restricted iframes or mobile webviews
   }
 }
 
@@ -259,11 +242,6 @@ export default function App() {
   const showSocialPopupNotification = useCallback((alertItem: PartyAlertItem) => {
     setActivePopupToast(alertItem);
     playSocialNotificationChime();
-    triggerBrowserPushNotification(
-      alertItem.title || `BinDrop · ${alertItem.assigneeDisplayName}`,
-      alertItem.message,
-      alertItem.id
-    );
   }, []);
 
   const syncIncomingInvitations = useCallback(

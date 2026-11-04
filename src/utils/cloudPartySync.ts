@@ -856,12 +856,13 @@ function mergePartyDrops(
 export async function pullPartyByInviteCodeFromCloud(
   store: CloudSyncStoreLike,
   rawInviteCode: string,
-  options?: { forceFresh?: boolean }
+  options?: { forceFresh?: boolean; joiningEmail?: string }
 ): Promise<PartyState | null> {
   const cleanCode = cleanAlphanumericCode(rawInviteCode);
   if (cleanCode.length < 4) return null;
 
   const forceFresh = options?.forceFresh ?? true;
+  const cleanJoiningEmail = options?.joiningEmail ? options.joiningEmail.trim().toLowerCase() : '';
 
   const [codeDoc, globalDoc, allInvitesDoc] = await Promise.all([
     readCloudDoc<{
@@ -902,6 +903,9 @@ export async function pullPartyByInviteCodeFromCloud(
     !store.deletedPartyIds.includes(codeDoc.party.id)
   ) {
     const pid = codeDoc.party.id;
+    if (cleanJoiningEmail) {
+      store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, pid, cleanJoiningEmail);
+    }
     const partyBundle = await readCloudDoc<{
       party: PartyState;
       drops?: TrashDropLog[];
@@ -943,7 +947,10 @@ export async function pullPartyByInviteCodeFromCloud(
   // 2. Match from `global_index.codeMap` or `global_index.parties`
   const mappedPartyId = globalDoc?.codeMap?.[cleanCode];
   if (mappedPartyId && !store.deletedPartyIds.includes(mappedPartyId)) {
-    const pulled = await pullPartyByIdFromCloud(store, mappedPartyId, { forceFresh: true });
+    const pulled = await pullPartyByIdFromCloud(store, mappedPartyId, {
+      forceFresh: true,
+      joiningEmail: cleanJoiningEmail || undefined,
+    });
     if (pulled) return pulled;
   }
 
@@ -956,6 +963,9 @@ export async function pullPartyByInviteCodeFromCloud(
         doesInviteCodeMatch(remoteParty.inviteCode, cleanCode)
       ) {
         const pid = remoteParty.id;
+        if (cleanJoiningEmail) {
+          store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, pid, cleanJoiningEmail);
+        }
         const partyBundle = await readCloudDoc<{
           party: PartyState;
           drops?: TrashDropLog[];
@@ -995,6 +1005,13 @@ export async function pullPartyByInviteCodeFromCloud(
       !store.deletedPartyIds.includes(inv.partyId) &&
       doesInviteCodeMatch(inv.inviteCode, cleanCode)
     ) {
+      if (cleanJoiningEmail) {
+        store.leftPartyKeys = removeUserLeftKey(
+          store.leftPartyKeys,
+          inv.partyId,
+          cleanJoiningEmail
+        );
+      }
       const partyBundle = await readCloudDoc<{
         party: PartyState;
         drops?: TrashDropLog[];
@@ -1028,9 +1045,16 @@ export async function pullPartyByInviteCodeFromCloud(
 export async function pullPartyByIdFromCloud(
   store: CloudSyncStoreLike,
   partyId: string,
-  options?: { forceFresh?: boolean }
+  options?: { forceFresh?: boolean; joiningEmail?: string }
 ): Promise<PartyState | null> {
   if (!partyId || store.deletedPartyIds.includes(partyId)) return null;
+  if (options?.joiningEmail) {
+    store.leftPartyKeys = removeUserLeftKey(
+      store.leftPartyKeys,
+      partyId,
+      options.joiningEmail.trim().toLowerCase()
+    );
+  }
   const forceFresh = options?.forceFresh ?? true;
   const partyBundle = await readCloudDoc<{
     party: PartyState;
@@ -1112,9 +1136,16 @@ export async function deletePartiesFromCloud(
 export async function pushPartyStoreToCloud(
   store: CloudSyncStoreLike,
   targetPartyId?: string,
-  options?: { forceWrite?: boolean }
+  options?: { forceWrite?: boolean; rejoinedEmail?: string }
 ): Promise<void> {
   try {
+    if (targetPartyId && options?.rejoinedEmail) {
+      store.leftPartyKeys = removeUserLeftKey(
+        store.leftPartyKeys,
+        targetPartyId,
+        options.rejoinedEmail.trim().toLowerCase()
+      );
+    }
     // Purge any fake stub parties before syncing
     for (const [pid, p] of Object.entries(store.parties)) {
       if (isFakeStubParty(p)) {
@@ -1274,9 +1305,37 @@ export async function pushPartyStoreToCloud(
     const mergedDeleted = Array.from(
       new Set([...(existingGlobal?.deletedPartyIds || []), ...(store.deletedPartyIds || [])])
     ).slice(-60);
-    const mergedLeft = Array.from(
+    const rawMergedLeft = Array.from(
       new Set([...(existingGlobal?.leftPartyKeys || []), ...(store.leftPartyKeys || [])])
-    ).slice(-60);
+    );
+
+    // Strip any stale leftPartyKey from existingGlobal if the member is currently active in a local party
+    // and NOT marked as left in local store.leftPartyKeys (e.g., they rejoined with the 6-digit invite code!)
+    const mergedLeft = rawMergedLeft
+      .filter((lk) => {
+        if (targetPartyId && options?.rejoinedEmail) {
+          const cleanRejoined = options.rejoinedEmail.trim().toLowerCase();
+          if (
+            lk === `${targetPartyId}:${cleanRejoined}` ||
+            lk === `${cleanRejoined}:${targetPartyId}`
+          ) {
+            return false;
+          }
+        }
+        for (const [pid, localParty] of Object.entries(store.parties)) {
+          if (!localParty || isFakeStubParty(localParty) || mergedDeleted.includes(pid)) continue;
+          for (const m of localParty.members || []) {
+            const mEmail = (m.email || '').trim().toLowerCase();
+            if (!mEmail) continue;
+            const isMatchingKey = lk === `${pid}:${mEmail}` || lk === `${mEmail}:${pid}`;
+            if (isMatchingKey && !isUserLeftKeyMatched(store.leftPartyKeys || [], pid, mEmail)) {
+              return false;
+            }
+          }
+        }
+        return true;
+      })
+      .slice(-60);
 
     store.deletedPartyIds = mergedDeleted;
     store.leftPartyKeys = mergedLeft;
@@ -1496,7 +1555,23 @@ export async function syncStoreWithCloud(
         if (Array.isArray(globalDoc.leftPartyKeys)) {
           for (const lk of globalDoc.leftPartyKeys) {
             if (!store.leftPartyKeys.includes(lk)) {
-              store.leftPartyKeys.push(lk);
+              // Do not import a stale cloud leftPartyKey if the user rejoined their active party
+              const isRejoinedActiveMember = Boolean(
+                cleanEmail &&
+                  ((activePid &&
+                    (lk === `${activePid}:${cleanEmail}` || lk === `${cleanEmail}:${activePid}`) &&
+                    (userMembershipDoc?.partyId === activePid ||
+                      (store.parties[activePid]?.members?.some(
+                        (m) => m.email?.toLowerCase() === cleanEmail
+                      ) &&
+                        !isUserLeftKeyMatched(store.leftPartyKeys, activePid, cleanEmail)))) ||
+                    (userMembershipDoc?.partyId &&
+                      (lk === `${userMembershipDoc.partyId}:${cleanEmail}` ||
+                        lk === `${cleanEmail}:${userMembershipDoc.partyId}`)))
+              );
+              if (!isRejoinedActiveMember) {
+                store.leftPartyKeys.push(lk);
+              }
             }
           }
         }

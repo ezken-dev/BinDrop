@@ -22,7 +22,7 @@ export interface MobilePushEnvironment {
 
 /**
  * Converts a URL-safe Base64 VAPID public key into a Uint8Array required by
- * `registration.pushManager.subscribe({ applicationServerKey })`.
+ * `registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey })`.
  */
 export function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -37,7 +37,7 @@ export function urlBase64ToUint8Array(base64String: string): Uint8Array {
 
 /**
  * Verifies whether an existing browser PushSubscription was created with the current VAPID public key.
- * If a subscription was created with an older VAPID key, it must be unsubscribed and re-created so
+ * If a subscription was created with an older VAPID key, it is unsubscribed and re-created so
  * closed-app background pushes are accepted by FCM/APNs.
  */
 function doesSubscriptionMatchVapidKey(
@@ -177,74 +177,9 @@ function saveLocalPushState(state: {
 }
 
 /**
- * Triggers a native OS notification through the active Service Worker (`registration.showNotification`).
- * Critical for mobile browsers (Android Chrome & iOS 16.4+ PWA) where `new Notification()`
- * throws an Illegal Constructor error on the main thread.
- */
-export async function triggerSystemNotificationViaServiceWorker(params: {
-  title: string;
-  body: string;
-  tag?: string;
-  category?: string;
-  url?: string;
-}): Promise<boolean> {
-  if (typeof window === 'undefined' || !('Notification' in window)) {
-    return false;
-  }
-  if (Notification.permission !== 'granted') {
-    return false;
-  }
-
-  const origin = window.location.origin;
-  const resolvedIconUrl = new URL('/pwa-192x192.png', origin).href;
-  const resolvedBadgeUrl = new URL('/badge-72x72.png', origin).href;
-
-  const options: NotificationOptions & { renotify?: boolean; vibrate?: number[] } = {
-    body: params.body,
-    icon: resolvedIconUrl,
-    badge: resolvedBadgeUrl,
-    tag: params.tag || `bindrop-${Date.now()}`,
-    renotify: true,
-    vibrate: [200, 100, 220],
-    requireInteraction:
-      params.category === 'WARNING_5H' || params.category === 'MISSED_DEADLINE',
-    data: {
-      url: params.url || '/',
-      category: params.category || 'TURN_REMINDER',
-      timestamp: Date.now(),
-    },
-  };
-
-  try {
-    if ('serviceWorker' in navigator) {
-      const reg =
-        (await navigator.serviceWorker.getRegistration('/')) ||
-        (await registerBinDropServiceWorker());
-      if (reg && 'showNotification' in reg) {
-        await reg.showNotification(params.title, options);
-        return true;
-      }
-    }
-  } catch {
-    // Fallback to desktop Notification constructor if ServiceWorker showNotification fails
-  }
-
-  try {
-    new Notification(params.title, {
-      body: params.body,
-      icon: resolvedIconUrl,
-      badge: resolvedBadgeUrl,
-      tag: params.tag || `bindrop-${Date.now()}`,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Internal helper that ensures the browser's PushManager subscription matches the server's
- * VAPID public key and registers the subscription with both the Express backend and Cloud Sync.
+ * VAPID public key (using `userVisibleOnly: true` and `urlBase64ToUint8Array`) and registers
+ * the subscription with both the Express backend and Cloud Sync.
  */
 async function ensureValidPushSubscriptionAndRegister(params: {
   userEmail: string;
@@ -253,6 +188,9 @@ async function ensureValidPushSubscriptionAndRegister(params: {
   partyId?: string | null;
 }): Promise<PushSubscriptionJSON | null> {
   const registration = await registerBinDropServiceWorker();
+  if (!registration || !('pushManager' in registration)) {
+    return null;
+  }
 
   let vapidPublicKey = FALLBACK_VAPID_PUBLIC_KEY;
   try {
@@ -265,29 +203,27 @@ async function ensureValidPushSubscriptionAndRegister(params: {
   }
 
   let subscriptionJson: PushSubscriptionJSON | null = null;
-  if (registration && 'pushManager' in registration) {
-    try {
-      const existingSub = await registration.pushManager.getSubscription();
-      if (existingSub && doesSubscriptionMatchVapidKey(existingSub, vapidPublicKey)) {
-        subscriptionJson = existingSub.toJSON();
-      } else {
-        if (existingSub) {
-          try {
-            await existingSub.unsubscribe();
-          } catch {
-            // ignore unsubscribe error
-          }
+  try {
+    const existingSub = await registration.pushManager.getSubscription();
+    if (existingSub && doesSubscriptionMatchVapidKey(existingSub, vapidPublicKey)) {
+      subscriptionJson = existingSub.toJSON();
+    } else {
+      if (existingSub) {
+        try {
+          await existingSub.unsubscribe();
+        } catch {
+          // ignore unsubscribe error
         }
-        const convertedVapidKey = urlBase64ToUint8Array(vapidPublicKey);
-        const newSub = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: convertedVapidKey as unknown as BufferSource,
-        });
-        subscriptionJson = newSub.toJSON();
       }
-    } catch (subErr) {
-      console.warn('PushManager subscription note:', subErr);
+      const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey);
+      const newSub = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: applicationServerKey as unknown as BufferSource,
+      });
+      subscriptionJson = newSub.toJSON();
     }
+  } catch (subErr) {
+    console.warn('PushManager subscription error:', subErr);
   }
 
   const nowIso = new Date().toISOString();
@@ -385,6 +321,8 @@ export async function autoSyncAndHealPushSubscription(params: {
 
 /**
  * Must ONLY be called inside an explicit user click/tap handler (e.g. "Turn on Alerts" toggle switch).
+ * Subscribes with `userVisibleOnly: true` and `urlBase64ToUint8Array(vapidPublicKey)` and dispatches
+ * the confirmation notification strictly through the backend Web Push -> Service Worker `push` event.
  */
 export async function subscribeUserToBackgroundPush(params: {
   userEmail: string;
@@ -438,20 +376,28 @@ export async function subscribeUserToBackgroundPush(params: {
   const subscriptionJson = await ensureValidPushSubscriptionAndRegister(params);
 
   if (!subscriptionJson?.endpoint) {
-    saveLocalPushState({
-      enabled: true,
-      explicitlyDisabled: false,
-      endpoint: 'local-sw-notification',
-      updatedAt: new Date().toISOString(),
-    });
+    return {
+      ok: false,
+      permission: 'granted',
+      error:
+        'Could not create a background Web Push subscription on this browser. Please make sure BinDrop is installed to your Home Screen.',
+    };
   }
 
-  await triggerSystemNotificationViaServiceWorker({
-    title: '🔔 BinDrop Lock-Screen Alerts Active!',
-    body: 'You will now receive lock-screen & banner alerts even when BinDrop is completely closed.',
-    tag: 'bindrop-alerts-enabled',
-    category: 'TURN_REMINDER',
-  });
+  // Trigger a genuine backend Web Push so the confirmation notification is delivered strictly
+  // by the Service Worker `push` event listener (no frontend `new Notification()` fallback).
+  await apiFetch('/api/push/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userEmail: params.userEmail.trim().toLowerCase(),
+      userUid: params.userUid,
+      userDisplayName: params.userDisplayName,
+      partyId: params.partyId || null,
+      title: '🔔 BinDrop Lock-Screen Alerts Active!',
+      body: 'You will now receive lock-screen & banner alerts even when BinDrop is completely closed.',
+    }),
+  }).catch(() => {});
 
   return {
     ok: true,

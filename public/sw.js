@@ -1,10 +1,10 @@
 /* eslint-disable no-restricted-globals */
-// BinDrop Background Service Worker (sw.js)
-// Provides offline-capable fetch handling and background Web Push lock-screen notifications
-// on Android (FCM) and iOS 16.4+ Home Screen PWAs (APNs) even when the app is completely closed.
+// BinDrop Background Service Worker (public/sw.js)
+// Strictly enforces OS-level background Web Push execution on iOS 16.4+ PWAs (APNs) and Android (FCM)
+// even when the application is completely closed or killed.
 
-const SW_VERSION = 'bindrop-sw-v6';
-const CACHE_NAME = 'bindrop-pwa-cache-v6';
+const SW_VERSION = 'bindrop-sw-v7';
+const CACHE_NAME = 'bindrop-pwa-cache-v7';
 const DEFAULT_VAPID_PUBLIC_KEY =
   'BBlcgquiiX4Z2nB_QHC0Kw95BUF6OZXyc64av5PeM5eFR3E49jEQFCynwwO2InaDlpteGl2WjluaRgFZDLio5Xk';
 
@@ -58,7 +58,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Required fetch handler so all Android browsers pass the PWA installability check
+// Fetch handler required for Android / iOS PWA installability
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
@@ -95,7 +95,9 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Listen for encrypted background Web Push payloads from the OS push daemon (works when app is completely closed)
+// 1. OS-Level Background Push Listener
+// Strictly wraps self.registration.showNotification(...) inside event.waitUntil(...)
+// and safely parses event.data.json() with a try/catch plain-text fallback.
 self.addEventListener('push', (event) => {
   const origin = self.location.origin;
   const defaultIconUrl = new URL('/pwa-192x192.png', origin).href;
@@ -104,10 +106,10 @@ self.addEventListener('push', (event) => {
   let payload = {
     title: 'BinDrop Household Alert',
     body: 'You have a new household trash duty update!',
+    url: '/',
     icon: defaultIconUrl,
     badge: defaultBadgeUrl,
     tag: 'bindrop-alert-' + Date.now(),
-    url: '/',
     category: 'TURN_REMINDER',
     senderName: 'BinDrop',
   };
@@ -120,15 +122,15 @@ self.addEventListener('push', (event) => {
         ...parsed,
         title: parsed.title || payload.title,
         body: parsed.body || parsed.message || payload.body,
+        url: parsed.url || '/',
         icon: new URL(parsed.icon || '/pwa-192x192.png', origin).href,
         badge: new URL(parsed.badge || '/badge-72x72.png', origin).href,
         tag: parsed.tag || 'bindrop-alert-' + Date.now(),
-        url: parsed.url || '/',
       };
-    } catch {
-      const rawText = event.data.text();
-      if (rawText) {
-        payload.body = rawText;
+    } catch (err) {
+      const fallbackText = event.data.text();
+      if (fallbackText) {
+        payload.body = fallbackText;
       }
     }
   }
@@ -139,11 +141,8 @@ self.addEventListener('push', (event) => {
     badge: payload.badge,
     tag: payload.tag,
     renotify: true,
-    requireInteraction:
-      payload.category === 'WARNING_5H' ||
-      payload.category === 'MISSED_DEADLINE' ||
-      payload.category === 'PHOTO_SUBMITTED',
-    vibrate: [220, 100, 220, 100, 320],
+    requireInteraction: true,
+    vibrate: [200, 100, 200, 100, 300],
     data: {
       url: payload.url || '/',
       category: payload.category,
@@ -158,27 +157,38 @@ self.addEventListener('push', (event) => {
     ],
   };
 
-  const notifyClientsPromise = self.clients
-    .matchAll({ type: 'window', includeUncontrolled: true })
-    .then((windowClients) => {
-      for (const client of windowClients) {
-        client.postMessage({
-          type: 'BINDROP_PUSH_RECEIVED',
-          payload,
-        });
-      }
-    })
-    .catch(() => {});
-
   event.waitUntil(
-    Promise.all([
-      self.registration.showNotification(payload.title, notificationOptions),
-      notifyClientsPromise,
-    ])
+    self.registration.showNotification(payload.title, notificationOptions)
   );
 });
 
-// Automatically renew Web Push subscription if Android FCM or iOS APNs rotates the device token in the background
+// 2. Deep-Linking Lock-Screen Tap Listener
+// Wrapped strictly inside event.waitUntil(...) using clients.openWindow(...)
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetPath = (event.notification.data && event.notification.data.url) || '/';
+  const targetUrl = new URL(targetPath, self.location.origin).href;
+
+  event.waitUntil(
+    clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((windowClients) => {
+        for (const client of windowClients) {
+          if (client.url === targetUrl && 'focus' in client) {
+            return client.focus();
+          }
+        }
+        for (const client of windowClients) {
+          if ('focus' in client) {
+            return client.focus();
+          }
+        }
+        return clients.openWindow(targetUrl);
+      })
+  );
+});
+
+// Automatically renew Web Push subscription if FCM or APNs rotates the device token in the background
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(
     (async () => {
@@ -209,54 +219,8 @@ self.addEventListener('pushsubscriptionchange', (event) => {
   );
 });
 
-// Handle lock-screen / banner tap to launch or focus the standalone PWA
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  const targetUrl = (event.notification.data && event.notification.data.url) || '/';
-
-  event.waitUntil(
-    self.clients
-      .matchAll({ type: 'window', includeUncontrolled: true })
-      .then((clientList) => {
-        for (const client of clientList) {
-          if ('focus' in client) {
-            client.postMessage({
-              type: 'BINDROP_NOTIFICATION_CLICKED',
-              data: event.notification.data,
-            });
-            return client.focus();
-          }
-        }
-        if (self.clients.openWindow) {
-          return self.clients.openWindow(targetUrl);
-        }
-        return undefined;
-      })
-  );
-});
-
-// Allow immediate local OS notification trigger via Service Worker postMessage
 self.addEventListener('message', (event) => {
-  if (!event.data) return;
-  if (event.data.type === 'SKIP_WAITING') {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
-    return;
-  }
-  if (event.data.type === 'SHOW_LOCAL_NOTIFICATION') {
-    const { title, body, tag, icon, badge, category, url } = event.data.payload || {};
-    event.waitUntil(
-      self.registration.showNotification(title || 'BinDrop Alert', {
-        body: body || 'Your household trash duty status has been updated.',
-        icon: icon || '/pwa-192x192.png',
-        badge: badge || '/badge-72x72.png',
-        tag: tag || 'bindrop-local-' + Date.now(),
-        renotify: true,
-        vibrate: [180, 90, 220],
-        data: {
-          url: url || '/',
-          category: category || 'TURN_REMINDER',
-        },
-      })
-    );
   }
 });

@@ -572,12 +572,12 @@ async function sendBackgroundWebPush(params: {
   const payloadStr = JSON.stringify({
     title: params.title,
     body: params.body,
+    url: params.url || '/',
     icon: '/pwa-192x192.png',
     badge: '/badge-72x72.png',
     tag: `bindrop-push-${Date.now()}`,
     category: params.category || 'TURN_REMINDER',
     senderName: params.senderName || 'BinDrop',
-    url: params.url || '/',
   });
 
   let sentCount = 0;
@@ -587,8 +587,8 @@ async function sendBackgroundWebPush(params: {
     matchingSubs.map(async (subRecord) => {
       try {
         await webpush.sendNotification(subRecord.subscription, payloadStr, {
-          TTL: 86400,
           urgency: 'high',
+          TTL: 86400,
         });
         sentCount++;
       } catch (err: any) {
@@ -788,10 +788,24 @@ function hydrateClientCachedBundleIfNeeded(
   }
 
   if (Array.isArray(clientLeftPartyKeys)) {
+    const activeServerPid = cleanEmail ? store.accounts[cleanEmail]?.partyId : undefined;
     for (const lk of clientLeftPartyKeys) {
       if (typeof lk === 'string' && lk && !store.leftPartyKeys.includes(lk)) {
-        store.leftPartyKeys.push(lk);
-        dirty = true;
+        // Do not let a stale client leftPartyKey override an active rejoined server party
+        const isRejoinedOnServer = Boolean(
+          cleanEmail &&
+            activeServerPid &&
+            (lk === `${activeServerPid}:${cleanEmail}` ||
+              lk === `${cleanEmail}:${activeServerPid}`) &&
+            store.parties[activeServerPid]?.members?.some(
+              (m) => m.email.toLowerCase() === cleanEmail
+            ) &&
+            !isLeftKeyMatchedServer(activeServerPid, cleanEmail)
+        );
+        if (!isRejoinedOnServer) {
+          store.leftPartyKeys.push(lk);
+          dirty = true;
+        }
       }
     }
   }
@@ -1937,7 +1951,10 @@ async function startServer() {
     hydrateClientCachedBundleIfNeeded(null, cleanEmail, cachedParties, cachedInvitations);
 
     // Pull latest state for this 6-character code from Dual-Engine Cloud Sync (Ntfy + Firestore)
-    await pullPartyByInviteCodeFromCloud(store as any, normalizedCode, { forceFresh: true });
+    await pullPartyByInviteCodeFromCloud(store as any, normalizedCode, {
+      forceFresh: true,
+      joiningEmail: cleanEmail,
+    });
 
     let matchingParty = Object.values(store.parties).find(
       (p) =>
@@ -2055,7 +2072,10 @@ async function startServer() {
     }
 
     saveStore();
-    await pushPartyStoreToCloud(store as any, matchingParty.id, { forceWrite: true });
+    await pushPartyStoreToCloud(store as any, matchingParty.id, {
+      forceWrite: true,
+      rejoinedEmail: cleanEmail,
+    });
     sendBackgroundWebPush({
       targetEmails: [matchingParty.hostEmail],
       targetUserIds: [matchingParty.hostId],
@@ -2148,13 +2168,16 @@ async function startServer() {
 
     if (!targetParty && resolvedPartyId) {
       targetParty =
-        (await pullPartyByIdFromCloud(store as any, resolvedPartyId, { forceFresh: true })) ||
-        undefined;
+        (await pullPartyByIdFromCloud(store as any, resolvedPartyId, {
+          forceFresh: true,
+          joiningEmail: cleanEmail,
+        })) || undefined;
     }
     if (!targetParty && resolvedInviteCode) {
       targetParty =
         (await pullPartyByInviteCodeFromCloud(store as any, resolvedInviteCode, {
           forceFresh: true,
+          joiningEmail: cleanEmail,
         })) || undefined;
     }
     if (!targetParty && inv?.partySnapshot && !isFakeStubParty(inv.partySnapshot)) {
@@ -2270,7 +2293,10 @@ async function startServer() {
     }
 
     saveStore();
-    await pushPartyStoreToCloud(store as any, targetParty.id, { forceWrite: true });
+    await pushPartyStoreToCloud(store as any, targetParty.id, {
+      forceWrite: true,
+      rejoinedEmail: cleanEmail,
+    });
     sendBackgroundWebPush({
       targetEmails: [targetParty.hostEmail],
       targetUserIds: [targetParty.hostId],

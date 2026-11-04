@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan to enable reliable background lock-screen Web Push notifications on Android and iOS even when BinDrop is completely closed or swiped away, covering all household events, deterministic VAPID keys, and automatic subscription self-healing on login.",
-  "updatedAt": "2026-11-04T06:48:50.394799538Z",
+  "summary": "Implementation plan for enforcing pure Service Worker OS-level Web Push notifications (eliminating frontend polling Notification fallbacks) and fixing the party rejoin bug where leaving and rejoining with a 6-digit invite code forcefully kicks the user back out.",
+  "updatedAt": "2026-11-04T07:13:22.697837577Z",
   "requestFeedback": true,
   "userFacing": true
 }

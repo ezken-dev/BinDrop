@@ -1108,7 +1108,10 @@ async function executeClientFallbackRoute(
     }
 
     // Pull directly by 6-character invite code from Dual-Engine Cloud Sync (Ntfy + Firestore)
-    await pullPartyByInviteCodeFromCloud(store, normalizedCode, { forceFresh: true });
+    await pullPartyByInviteCodeFromCloud(store, normalizedCode, {
+      forceFresh: true,
+      joiningEmail: cleanEmail,
+    });
 
     const matchingParty = Object.values(store.parties).find(
       (p) =>
@@ -1226,7 +1229,10 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, matchingParty.id, { forceWrite: true });
+    await pushPartyStoreToCloud(store, matchingParty.id, {
+      forceWrite: true,
+      rejoinedEmail: cleanEmail,
+    });
     return {
       ok: true,
       status: 200,
@@ -1376,12 +1382,17 @@ async function executeClientFallbackRoute(
     let party = targetPartyId ? store.parties[targetPartyId] : undefined;
     if (!party && targetPartyId) {
       party =
-        (await pullPartyByIdFromCloud(store, targetPartyId, { forceFresh: true })) || undefined;
+        (await pullPartyByIdFromCloud(store, targetPartyId, {
+          forceFresh: true,
+          joiningEmail: cleanEmail,
+        })) || undefined;
     }
     if (!party && targetInviteCode) {
       party =
-        (await pullPartyByInviteCodeFromCloud(store, targetInviteCode, { forceFresh: true })) ||
-        undefined;
+        (await pullPartyByInviteCodeFromCloud(store, targetInviteCode, {
+          forceFresh: true,
+          joiningEmail: cleanEmail,
+        })) || undefined;
     }
     if (!party && invitation?.partySnapshot && !isFakeStubParty(invitation.partySnapshot)) {
       party = invitation.partySnapshot;
@@ -1490,7 +1501,10 @@ async function executeClientFallbackRoute(
     }
 
     saveClientStore(store);
-    await pushPartyStoreToCloud(store, party.id, { forceWrite: true });
+    await pushPartyStoreToCloud(store, party.id, {
+      forceWrite: true,
+      rejoinedEmail: cleanEmail,
+    });
     return {
       ok: true,
       status: 200,
@@ -2455,6 +2469,24 @@ export async function apiFetch<T = any>(
         ? store.invitations.filter((inv) => !store.deletedPartyIds.includes(inv.partyId))
         : [];
 
+      if (
+        (pathname === '/api/party/join' || pathname === '/api/party/respond-invite') &&
+        email
+      ) {
+        const joiningCode = String(bodyObj.inviteCode || '').trim().toUpperCase();
+        for (const p of Object.values(store.parties)) {
+          if (
+            p &&
+            ((joiningCode && doesInviteCodeMatch(p.inviteCode, joiningCode)) ||
+              (partyId && p.id === partyId))
+          ) {
+            store.leftPartyKeys = removeUserLeftKey(store.leftPartyKeys, p.id, email);
+          }
+        }
+        store.clearedPartyUsers = store.clearedPartyUsers.filter((e) => e !== email);
+        saveClientStore(store);
+      }
+
       if (!options?.method || options.method.toUpperCase() === 'POST') {
         finalOptions = {
           ...options,
@@ -2476,7 +2508,10 @@ export async function apiFetch<T = any>(
             cachedParties,
             cachedInvitations,
             deletedPartyIds: store.deletedPartyIds,
-            leftPartyKeys: store.leftPartyKeys,
+            leftPartyKeys:
+              pathname === '/api/party/join' || pathname === '/api/party/respond-invite'
+                ? []
+                : store.leftPartyKeys,
           }),
         };
       }
